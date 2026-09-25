@@ -40,7 +40,8 @@ function summaryBaseFor(sport, league) { return "https://site.api.espn.com/apis/
 
 function ymd(d) {
     var y = d.getFullYear(), m = d.getMonth() + 1, dd = d.getDate()
-    return y + (m < 10 ? "0" + m : m) + (dd < 10 ? "0" + dd : dd)
+    // String() first: from October on, year + month would add as numbers
+    return String(y) + (m < 10 ? "0" + m : m) + (dd < 10 ? "0" + dd : dd)
 }
 
 function sundayOf(d) {
@@ -50,11 +51,16 @@ function sundayOf(d) {
     return nd
 }
 
+// The day strip is a 7-day window centered on today (3 days back, 3 ahead),
+// not a Sun–Sat calendar week, so today always sits in the middle cell.
+var CENTER_DAY = 3
 function weekDataFor(today) {
-    var s = sundayOf(today)
+    var s = new Date(today)
+    s.setHours(0, 0, 0, 0)
+    s.setDate(s.getDate() - CENTER_DAY)
     var dates = [], strs = []
     for (var i = 0; i < 7; i++) { var dd = new Date(s); dd.setDate(s.getDate() + i); dates.push(dd); strs.push(ymd(dd)) }
-    return { weekStart: s, weekDates: dates, weekDateStrs: strs, selectedDay: today.getDay() }
+    return { weekStart: s, weekDates: dates, weekDateStrs: strs, selectedDay: CENTER_DAY }
 }
 
 function weekDataShift(weekStart, delta, today) {
@@ -63,7 +69,7 @@ function weekDataShift(weekStart, delta, today) {
     var dates = [], strs = []
     for (var i = 0; i < 7; i++) { var dd = new Date(ns); dd.setDate(ns.getDate() + i); dates.push(dd); strs.push(ymd(dd)) }
     var idx = strs.indexOf(ymd(today))
-    return { weekStart: ns, weekDates: dates, weekDateStrs: strs, selectedDay: idx >= 0 ? idx : 0 }
+    return { weekStart: ns, weekDates: dates, weekDateStrs: strs, selectedDay: idx >= 0 ? idx : CENTER_DAY }
 }
 
 function weekLabel(weekDates) {
@@ -80,36 +86,11 @@ function titleize(s) {
     return t.split(/[\s_\/]+/).map(function(w){ return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() }).join(" ")
 }
 
-// Favorites: new format { nfl:[...], nba:[...] }  old format ["BUF"] -> migrate to {nfl:[...]}
-function parseFavorites(raw) {
-    var parsed
-    try { parsed = JSON.parse(raw || "{}") } catch (e) { return {} }
-    if (Array.isArray(parsed)) {
-        // migrate old flat array -> nfl
-        return parsed.length ? { nfl: parsed } : {}
-    }
-    if (parsed && typeof parsed === "object") {
-        // ensure values are arrays
-        var out = {}
-        for (var k in parsed) if (Array.isArray(parsed[k])) out[k] = parsed[k].slice()
-        return out
-    }
-    return {}
-}
 function isFav(favMapOrArray, abbr, leagueId) {
     if (Array.isArray(favMapOrArray)) return favMapOrArray.indexOf(abbr) >= 0
     if (!leagueId) return false
     var arr = favMapOrArray[leagueId] || []
     return arr.indexOf(abbr) >= 0
-}
-function toggleFavMap(favMap, leagueId, abbr) {
-    var out = {}
-    for (var k in favMap) out[k] = favMap[k].slice()
-    var arr = out[leagueId] ? out[leagueId].slice() : []
-    var idx = arr.indexOf(abbr)
-    if (idx >= 0) arr.splice(idx, 1); else arr.push(abbr)
-    if (arr.length) out[leagueId] = arr; else delete out[leagueId]
-    return out
 }
 function isLeagueFav(favMap, leagueId) { var arr = favMap["favoriteLeagues"] || []; return arr.indexOf(leagueId) >= 0 }
 // League ids with at least one favorited team — the bar covers these plus
@@ -122,15 +103,6 @@ function favLeagues(favMap) {
         if (leagueFor(k).id !== k) continue
         if (Array.isArray(favMap[k]) && favMap[k].length) out.push(k)
     }
-    return out
-}
-function toggleLeagueFav(favMap, leagueId) {
-    var out = {}
-    for (var k in favMap) out[k] = favMap[k].slice()
-    var arr = out["favoriteLeagues"] ? out["favoriteLeagues"].slice() : []
-    var idx = arr.indexOf(leagueId)
-    if (idx >= 0) arr.splice(idx, 1); else arr.push(leagueId)
-    if (arr.length) out["favoriteLeagues"] = arr; else delete out["favoriteLeagues"]
     return out
 }
 var leagueTier = { nfl:1, nba:1, mlb:1, nhl:1, wnba:1, mls:1, cfb:2, ncaam:2, ncaaw:2, epl:2, ucl:2, laliga:3, bundes:3, seriea:3, ligue1:3 }
@@ -202,6 +174,15 @@ function scoreEvent(prev, g) {
 // Minutes until kickoff when a pre-game reminder should fire (inside the
 // window), else -1. state comes from ESPN ("pre"|"in"|"post"). Window
 // defaults to 10 for the legacy 3-arg call shape.
+// Start time for list rows: "5:00 PM", "6:30 PM" — 12-hour, always with
+// minutes so times line up at the same width, never seconds.
+function shortTime(d) {
+    if (!(d instanceof Date) || isNaN(d.getTime())) return ""
+    var h = d.getHours(), m = d.getMinutes()
+    var ap = h < 12 ? "AM" : "PM"
+    var h12 = h % 12 === 0 ? 12 : h % 12
+    return h12 + ":" + (m < 10 ? "0" + m : m) + " " + ap
+}
 function kickoffMinutes(dateStr, state, now, window) {
     if (state !== "pre" || !dateStr) return -1
     var t = new Date(dateStr)
@@ -231,29 +212,6 @@ var MAX_INJURIES = 24
 var MAX_STR = 300              // default string cap in sanitize()
 var SANITIZE_DEPTH = 12        // max nesting depth retained
 var SANITIZE_NODES = 10000     // max total nodes retained
-
-// --- Favorites state (dconf) ---
-// Favorites persist through the desktop dconf daemon: the plugin only runs
-// fixed-argv `dconf read/write` (same trust shape as the curl/stat/dd baseline)
-// and holds no state-file paths of its own. Values are GVariant text-format
-// strings, so the JSON payload is wrapped in single quotes with \ and '
-// escaped; dconf-service serializes concurrent writers for us.
-var DCONF_FAVORITES = "/net/slowburnaz/omascore/favorites"
-function dconfEscape(s) {
-    return "'" + String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'"
-}
-function dconfUnescape(s) {
-    s = String(s || "").trim()
-    // dconf read returns canonical GVariant text: the wrapper may be ' or "
-    if (s.length >= 2 && ((s.charAt(0) === "'" && s.charAt(s.length - 1) === "'") || (s.charAt(0) === '"' && s.charAt(s.length - 1) === '"'))) s = s.slice(1, -1)
-    var out = ""
-    for (var i = 0; i < s.length; i++) {
-        var c = s.charAt(i)
-        if (c === "\\" && i + 1 < s.length) { i++; c = s.charAt(i) }
-        out += c
-    }
-    return out
-}
 
 // --- Shared live board (bar state) ---
 // Every per-screen panel instance imports this library into the SAME engine,
@@ -303,11 +261,9 @@ function resetKickoffMarks() { for (var k in kickoffNotified) delete kickoffNoti
 
 // --- Shared favorites state ---
 // All per-screen panels import this library into the SAME engine, so favorites
-// live here process-wide: every toggle or startup restore lands through
-// setFavorites, which notifies the other panels' watchers. dconf is
-// persistence only — panels write through on change and read once at startup;
-// there is no watch process. The source panel of a change is skipped (it
-// already applied its own UI update).
+// live here process-wide. They come from Config.js (favoriteTeams /
+// favoriteLeagues), loaded once at startup through setFavorites, which
+// notifies the other panels' watchers. The source panel is skipped.
 var favorites = {}
 var favWatchers = []
 function setFavorites(f, source) {
@@ -477,6 +433,56 @@ function parseGames(raw) {
     return { games: out, error: out.length ? "" : "No games scheduled" }
 }
 
+// Team schedule (Favorites view): one request per (league, team, season type).
+// No seasontype = the current one (e.g. preseason); 2 and 3 cover regular
+// season and postseason so the next games show across a season boundary.
+function scheduleArgs(leagueId, abbr, seasonType) {
+    if (!/^[A-Za-z0-9]{1,8}$/.test(String(abbr || ""))) return null
+    var L = leagueFor(leagueId)
+    if (L.id !== leagueId) return null
+    var url = "https://site.api.espn.com/apis/site/v2/sports/" + L.sport + "/" + L.league + "/teams/" + String(abbr).toLowerCase() + "/schedule"
+    if (seasonType) url += "?seasontype=" + seasonType
+    return ["curl", "-fsS", "--max-time", "10", "--max-filesize", MAX_BYTES, url]
+}
+// Every (league, abbr) with a favorited team, skipping the league-fav marker.
+function favTeams(favMap) {
+    var out = []
+    var lgs = favLeagues(favMap)
+    for (var i = 0; i < lgs.length; i++) {
+        var arr = favMap[lgs[i]]
+        for (var j = 0; j < arr.length; j++) out.push({ lg: lgs[i], abbr: arr[j] })
+    }
+    return out
+}
+// Schedule payloads put status on the competition, logos in team.logos[],
+// and scores as { displayValue } objects; normalize to parseGames' shape.
+function parseSchedule(raw) {
+    var txt = String(raw || "").trim()
+    if (!txt) return []
+    var data = parseBoundedJson(txt)
+    if (!data || typeof data !== "object") return []
+    var events = Array.isArray(data.events) ? data.events.slice(0, MAX_EVENTS) : []
+    var out = []
+    for (var i = 0; i < events.length; i++) {
+        var ev = events[i]
+        if (!ev || typeof ev !== "object") continue
+        var comp = Array.isArray(ev.competitions) ? ev.competitions[0] : null
+        if (!comp || typeof comp !== "object") continue
+        var st = (comp.status && comp.status.type) ? comp.status.type : ((ev.status && ev.status.type) ? ev.status.type : null)
+        var g = { id: clip(ev.id, 16), state: st ? clip(st.state, 16) : "", detail: st ? clip(st.shortDetail, 100) : "", date: clip(ev.date, 40), away: null, home: null }
+        var cs = Array.isArray(comp.competitors) ? comp.competitors : []
+        for (var j = 0; j < cs.length && j < 4; j++) {
+            var c = cs[j]
+            if (!c || !c.team || (c.homeAway !== "away" && c.homeAway !== "home")) continue
+            var logo = c.team.logo || (Array.isArray(c.team.logos) && c.team.logos[0] ? c.team.logos[0].href : "")
+            var sc = c.score && typeof c.score === "object" ? c.score.displayValue : c.score
+            g[c.homeAway] = { id: clip(c.team.id, 16), abbr: clip(c.team.abbreviation, 16), name: clip(c.team.displayName, 100), score: clip(sc, 16), logo: clip(logo, 500), color: clip(c.team.color, 16), record: "" }
+        }
+        if (g.away && g.home && validEventId(g.id)) out.push(g)
+    }
+    return out
+}
+
 // One week-range scoreboard fetch (?dates=A-B) covers the whole selector week;
 // bucket each event by its LOCAL calendar day so dots match the panel's days.
 function parseWeekRange(raw, weekDateStrs) {
@@ -497,8 +503,9 @@ function parseWeekRange(raw, weekDateStrs) {
 }
 
 function nextSelectedDay(hasGames, selectedDay) {
+    // forward only: the window runs past to future, so wrapping would point back in time
     if (hasGames[selectedDay]) return -1
-    for (var k = 0; k < 7; k++) { var idx = (selectedDay + k + 1) % 7; if (hasGames[idx]) return idx }
+    for (var idx = selectedDay + 1; idx < 7; idx++) if (hasGames[idx]) return idx
     return -1
 }
 

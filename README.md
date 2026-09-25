@@ -24,7 +24,7 @@ omarchy plugin add https://github.com/SlowburnAZ/omascore.git --enable
 
 - The bar widget shows live game scores with favorite teams highlighted in accent color. **Bar display** in Settings switches between favorite score, live count, next-game start time, and icon-only — live favorites always take priority, and the tooltip carries the full game line.
 - Tap a game to open the **details panel** with full stats, venue, and player lists.
-- Use the **league switcher** pills at the top to change between NFL, CFB, NBA, WNBA, NCAAM, NCAAW, MLB, NHL, MLS, EPL, LaLiga, Bundesliga, Serie A, Ligue 1, UCL — or **★ Favorites** for today's favorited-team games across every league at once.
+- Use the **league switcher** pills at the top to change between NFL, CFB, NBA, WNBA, NCAAM, NCAAW, MLB, NHL, MLS, EPL, LaLiga, Bundesliga, Serie A, Ligue 1, UCL — or **★ Favorites** for the next 5 games of your favorite teams (set in `Config.js`).
 - Score changes, final scores, and kickoff reminders for favorited teams raise desktop notifications — **Finals only** limits them to final scores and **Kickoff reminders** sets the warning window (Off/10/30/60 min). Find them under **Notifications** in the panel's **Settings** screen (gear icon, top right of the panel header), or `omarchy bar set slowburnaz.omascore notifications false`.
 - **Keyboard**: ↑/↓ or j/k moves a highlight across games, Enter/Space opens the highlighted game, Esc steps back (highlight → detail → panel). Multiple live favorite games rotate in the bar every 4s. Header icons (refresh, today, settings) show tooltips on hover.
 - **Pre-game odds**: spread and over/under appear on upcoming games by default — toggle off via **Show pre-game odds** in Settings.
@@ -38,7 +38,7 @@ omarchy plugin add https://github.com/SlowburnAZ/omascore.git --enable
 - **Live situation**: for NFL/CFB games in progress, the current down & distance and ball spot render in accent under the venue line.
 - **Matchup predictor**: for pre-games where ESPN publishes win chances, each side's percentage renders team-colored under the venue line (hidden once the game starts).
 - **Players tab**: Player statistics grouped by category with a fixed 110px Player column and horizontally scrollable stat columns.
-- **Favorites**: Teams saved per-league appear pinned at the top of the game list, above live games. They persist in dconf (the desktop settings store), so `omarchy plugin disable` / `remove` + `add`/`enable` keeps them.
+- **Favorites**: Set in [`Config.js`](Config.js) (`favoriteTeams`, `favoriteLeagues`) — there are no star toggles in the panel. Favorited teams sort to the top of each day, drive the bar widget and notifications, and the **★ Favorites** chip lists their next 5 games.
 - **Logos**: Team logos loaded from ESPN network sources (transparent PNG).
 
 ### Navigation
@@ -65,7 +65,6 @@ omarchy bar move slowburnaz.omascore --section right
 ## Dependencies
 
 - `curl` — all ESPN API calls run through it (preinstalled on Omarchy).
-- `dconf` — favorites persist through the desktop settings daemon (preinstalled on Omarchy).
 
 ## Data & attribution
 
