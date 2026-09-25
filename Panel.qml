@@ -1202,9 +1202,11 @@ Panel {
                   onClicked: root.selectDay(index)
                 }
 
+                // day name + date centered in the cell; the games dot sits on
+                // its own at the bottom so it doesn't pull the text upward
                 Column {
                   anchors.centerIn: parent
-                  spacing: 2
+                  spacing: 0
 
                   Text {
                     textFormat: Text.PlainText
@@ -1228,15 +1230,17 @@ Panel {
                     font.bold: true
                   }
 
-                  Rectangle {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    // opacity, not visible: keeps every cell's column the same height
-                    opacity: root.hasGames[index] ? 1 : 0
-                    width: 4
-                    height: 4
-                    radius: 2
-                    color: root.selectedDay === index ? Color.background : Color.accent
-                  }
+                }
+
+                Rectangle {
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  anchors.bottom: parent.bottom
+                  anchors.bottomMargin: Style.space(5)
+                  visible: root.hasGames[index]
+                  width: 4
+                  height: 4
+                  radius: 2
+                  color: root.selectedDay === index ? Color.background : Color.accent
                 }
 
               }
@@ -1525,7 +1529,7 @@ Panel {
                     Text {
                       textFormat: Text.PlainText
                       Layout.fillWidth: true
-                      horizontalAlignment: Text.AlignRight
+                      horizontalAlignment: Text.AlignHCenter
                       text: gameItem.status[0]
                       color: gameItem.isLive ? root.urgentColor : root.fg
                       opacity: gameItem.isFinal || gameItem.ppd ? 0.6 : 1
@@ -1537,7 +1541,7 @@ Panel {
                     Text {
                       textFormat: Text.PlainText
                       Layout.fillWidth: true
-                      horizontalAlignment: Text.AlignRight
+                      horizontalAlignment: Text.AlignHCenter
                       visible: text !== ""
                       text: gameItem.status[1]
                       color: root.fg
