@@ -1495,7 +1495,8 @@ Panel {
               readonly property bool homeLeads: modelData ? root.leads(modelData, "home") : false
               readonly property var status: root.statusLines(modelData)
               visible: root.listVisible
-              width: parent.width
+              // parent is null while a delegate is torn down (reload, removal)
+              width: parent ? parent.width : 0
               spacing: Style.space(6)
 
               // Favorites: date line above each game, start time on the right
