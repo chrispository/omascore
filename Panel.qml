@@ -6,6 +6,7 @@ import Quickshell.Io
 import qs.Ui
 import qs.Commons
 import "Model.js" as Model
+import "Config.js" as Config
 import "I18n.js" as I18n
 
 Panel {
@@ -219,9 +220,9 @@ Panel {
   }
   property string lastError: ""
 
-  // Favorites persist in dconf (see saveFavorites); the pre-dconf state files
-  // are no longer read or written. Notification claims + kickoff marks live in
-  // Model (shared across panels) — see requestNotification.
+  // Favorites come from Config.js (favoriteTeams / favoriteLeagues) — see
+  // restoreFavorites. Notification claims + kickoff marks live in Model
+  // (shared across panels) — see requestNotification.
   property var sessionCache: ({})       // per-league scoreboard paint cache, session-only
   readonly property string apiUrl: Model.apiUrl
   readonly property color urgentColor: root.bar ? root.bar.urgent : Color.urgent
@@ -323,37 +324,22 @@ Panel {
     else root.games = root.sorted(root.games)
     root.recount(); root.refreshBarFeed()
   }
-  function saveFavorites() { dconfWrite(Model.DCONF_FAVORITES, JSON.stringify(root.favorites)) }
   // Per-panel sync: shared Model.favorites notifies these watchers on every
   // change from any panel. The source panel is skipped (it applied its own
   // update). Deregistration matters — hot reload destroys instances.
   property var favWatcher: null
-  // Restore: read favorites from dconf once at startup. Empty on first run —
-  // no legacy file migration, the pre-dconf state files are dead.
+  // FAVORITES: loaded once at startup from Config.js (favoriteTeams +
+  // favoriteLeagues). There is no in-panel toggle; edit Config.js instead.
   property bool favoritesRestored: false
   function restoreFavorites() {
     if (root.favoritesRestored) return
     root.favoritesRestored = true
-    dconfRead(Model.DCONF_FAVORITES, function(raw) {
-      root.favorites = Model.setFavorites(Model.parseFavorites(Model.dconfUnescape(raw)), root.favWatcher)
-      root.applyFavorites()
-    })
-  }
-  function toggleFav(abbr, lg) {
-    var L = lg || root.currentLeagueId
-    root.favorites = Model.setFavorites(Model.toggleFavMap(Model.favorites, L, abbr), root.favWatcher)
-    root.saveFavorites()
-    // no immediate re-sort: rows jumping under the finger reads as a glitch —
-    // the reorder lands with the next fresh fetch instead (but the favs view
-    // drops unstarred rows right away, since they no longer belong there)
-    root.recount()
-    if (root.favView) root.refreshFavs()
-    root.refresh()
-  }
-  function isLeagueFav(id) { return Model.isLeagueFav(root.favorites, id) }
-  function toggleLeagueFav(id) {
-    root.favorites = Model.setFavorites(Model.toggleLeagueFav(Model.favorites, id), root.favWatcher)
-    root.saveFavorites()
+    var f = {}
+    var teams = Config.favoriteTeams || {}
+    for (var lg in teams) if (Array.isArray(teams[lg]) && teams[lg].length) f[lg] = teams[lg].map(function(a) { return String(a).toUpperCase() })
+    if (Array.isArray(Config.favoriteLeagues) && Config.favoriteLeagues.length) f["favoriteLeagues"] = Config.favoriteLeagues.slice()
+    root.favorites = Model.setFavorites(f, root.favWatcher)
+    root.applyFavorites()
   }
   function rank(g) { return Model.rank(g, root.favorites, root.currentLeagueId) }
   function sorted(list) { return Model.sorted(list, root.favorites, root.currentLeagueId) }
@@ -699,39 +685,6 @@ Panel {
       if (!silent) root.checkScoreNotifications(r.games)
     } catch (e) { root.lastError = "Parse error" }
   }
-  // dconf is persistence only: write-through on change, one read at startup.
-  // Cross-panel sync is in-process — all panels share one engine and land
-  // every change through Model.setFavorites — so no watch process exists.
-  property var dconfQueue: []
-  property var curDconf: null
-  function dconfRead(key, cb) { root.dconfQueue.push({ key: key, cb: cb, write: null }); root.pumpDconf() }
-  function dconfWrite(key, str, cb) { root.dconfQueue.push({ key: key, cb: cb, write: str }); root.pumpDconf() }
-  function pumpDconf() {
-    if (dconfProc.running || !root.dconfQueue.length) return
-    var job = root.dconfQueue.shift()
-    root.curDconf = job
-    dconfProc.running = false
-    dconfProc.command = job.write !== null
-      ? ["/usr/bin/dconf", "write", job.key, Model.dconfEscape(job.write)]
-      : ["/usr/bin/dconf", "read", job.key]
-    dconfProc.running = true
-  }
-  Process {
-    id: dconfProc
-    command: []
-    stdout: StdioCollector { id: dconfOut; waitForEnd: true }
-    onExited: function(exitCode) {
-      var job = root.curDconf
-      root.curDconf = null
-      if (!job) return
-      if (job.write !== null) {
-        if (exitCode !== 0) console.log("OmaScore: dconf write failed; favorites session-only this run")
-        if (job.cb) job.cb(exitCode === 0)
-      } else {
-        job.cb(exitCode === 0 ? String(dconfOut.text) : "")
-      }
-    }
-  }
   // Cross-instance notification dedup. Every bar hosts its own Panel (one per
   // screen), each polling ESPN independently, so a score transition fires once
   // per instance. All panels share ONE engine, so claims live in Model
@@ -994,7 +947,6 @@ Panel {
     property var game: null
     property string side: "away"
     property bool dimmed: false
-    property bool rowHovered: false
     readonly property var team: game ? game[side] : null
     readonly property string lg: game ? (game._lg || root.currentLeagueId) : root.currentLeagueId
     readonly property bool fav: team ? root.isFav(team.abbr, lg) : false
@@ -1037,7 +989,7 @@ Panel {
         id: nameText
         textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
-        width: Math.min(implicitWidth, parent.width - starText.width - Style.space(6))
+        width: parent.width
         text: line.team ? line.team.name : ""
         color: root.fg
         font.family: root.uiFont
@@ -1046,23 +998,6 @@ Panel {
         elide: Text.ElideRight
         HoverHandler { id: nameHover }
         PanelToolTip { visible: nameHover.hovered && nameText.truncated; text: nameText.text }
-      }
-      Text {
-        id: starText
-        textFormat: Text.PlainText
-        x: nameText.width + Style.space(5)
-        anchors.verticalCenter: parent.verticalCenter
-        visible: line.fav || line.rowHovered
-        text: line.fav ? "\u2605" : "\u2606"
-        color: line.fav ? Color.accent : root.fg
-        opacity: line.fav ? 1 : 0.5
-        font.pixelSize: Style.font.caption
-        MouseArea {
-          anchors.fill: parent
-          anchors.margins: -Style.space(4)
-          cursorShape: Qt.PointingHandCursor
-          onClicked: if (line.team) root.toggleFav(line.team.abbr, line.lg)
-        }
       }
     }
     Text {
@@ -1228,18 +1163,6 @@ Panel {
                       font.pixelSize: Style.font.bodySmall
                       font.weight: root.currentLeagueId == modelData.id ? Font.Bold : Font.Medium
                     }
-                    Text {
-                      textFormat: Text.PlainText
-                      visible: modelData.id !== "favs"
-                      text: root.isLeagueFav(modelData.id) ? "\u2605" : "\u2606"
-                      color: root.currentLeagueId == modelData.id ? Color.background : (root.isLeagueFav(modelData.id) ? Color.accent : root.fg)
-                      opacity: root.isLeagueFav(modelData.id) ? 1 : 0.6
-                      font.pixelSize: Style.font.caption
-                      MouseArea {
-                        anchors.fill: parent
-                        onClicked: function(mouse) { root.toggleLeagueFav(modelData.id); mouse.accepted = true }
-                      }
-                    }
                   }
                   MouseArea { anchors.fill: parent; onClicked: root.setLeague(modelData.id) }
                 }
@@ -1335,7 +1258,7 @@ Panel {
             textFormat: Text.PlainText
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
-            text: root.trFn("No upcoming favorite games \u2014 tap \u2606 on a team to follow it")
+            text: root.trFn("No upcoming favorite games \u2014 add teams to favoriteTeams in Config.js")
             visible: root.favView && root.games.length === 0 && root.listVisible
             color: root.fg
             opacity: 0.6
@@ -1499,7 +1422,7 @@ Panel {
               width: parent ? parent.width : 0
               spacing: Style.space(6)
 
-              // Favorites: date line above each game, start time on the right
+              // Favorites: date line above each game (time sits in the card like the day view)
               RowLayout {
                 width: parent.width
                 visible: root.favView
@@ -1523,16 +1446,6 @@ Panel {
                   font.pixelSize: Style.font.caption
                   font.weight: Font.Bold
                   font.letterSpacing: 0.8
-                }
-                Item { Layout.fillWidth: true }
-                Text {
-                  textFormat: Text.PlainText
-                  visible: gameItem.isPre && !gameItem.ppd
-                  text: root.startTime(modelData)
-                  color: root.fg
-                  font.family: root.figFont
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: true
                 }
               }
 
@@ -1592,12 +1505,11 @@ Panel {
                   ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 0
-                    TeamLine { Layout.fillWidth: true; game: modelData; side: "away"; dimmed: gameItem.isFinal && gameItem.homeLeads; rowHovered: cardHover.hovered }
-                    TeamLine { Layout.fillWidth: true; game: modelData; side: "home"; dimmed: gameItem.isFinal && gameItem.awayLeads; rowHovered: cardHover.hovered }
+                    TeamLine { Layout.fillWidth: true; game: modelData; side: "away"; dimmed: gameItem.isFinal && gameItem.homeLeads }
+                    TeamLine { Layout.fillWidth: true; game: modelData; side: "home"; dimmed: gameItem.isFinal && gameItem.awayLeads }
                   }
 
                   Rectangle {
-                    visible: statusCol.visible
                     Layout.preferredWidth: 1
                     Layout.fillHeight: true
                     Layout.topMargin: Style.space(2)
@@ -1607,8 +1519,6 @@ Panel {
 
                   ColumnLayout {
                     id: statusCol
-                    // Favorites shows the start time on the date line instead
-                    visible: !(root.favView && gameItem.isPre && !gameItem.ppd)
                     Layout.preferredWidth: Style.space(68)
                     Layout.maximumWidth: Style.space(68)
                     spacing: Style.space(2)

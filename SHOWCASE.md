@@ -16,7 +16,7 @@ The widget tints and shows your favorite team's live score the moment their game
 
 **The panel: the whole slate**
 
-Open the widget for the full scoreboard: a league switcher with favorites sorted first, a **★ Favorites** view spanning every league at once, a 7-day selector with game-count dots, a team filter on busy days, refresh and today shortcuts, team logos, live scores in accent, kickoff times in **your** timezone and locale format, and betting lines on upcoming games. Star a team and its row glides into place as the board updates.
+Open the widget for the full scoreboard: a league switcher with favorites sorted first, a **★ Favorites** view spanning every league at once, a 7-day selector with game-count dots, a team filter on busy days, refresh and today shortcuts, team logos, live scores in accent, kickoff times in **your** timezone and locale format, and betting lines on upcoming games. Favorites are set in `Config.js` and sort to the top as the board updates.
 
 *(attach: games_panel.png)*
 

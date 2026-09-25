@@ -10,7 +10,7 @@
 - **Keyboard-driven**: `↑/↓` + `Enter` + `Esc`; grouped settings for notifications, display, and language
 - **Speaks your language**: English, Spanish, Portuguese, and Dutch, via system locale or setting
 - **Hardened by design**: fixed-argv `curl` only (no shell), capped and sanitized responses, https-only links, ESPN-CDN-only media
-- **Zero setup**: ESPN public API, no keys, no accounts, favorites persist in dconf
+- **Zero setup**: ESPN public API, no keys, no accounts, favorites set in Config.js
 
 ```
 omarchy plugin add https://github.com/SlowburnAZ/omascore.git --enable

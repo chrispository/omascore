@@ -86,36 +86,11 @@ function titleize(s) {
     return t.split(/[\s_\/]+/).map(function(w){ return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() }).join(" ")
 }
 
-// Favorites: new format { nfl:[...], nba:[...] }  old format ["BUF"] -> migrate to {nfl:[...]}
-function parseFavorites(raw) {
-    var parsed
-    try { parsed = JSON.parse(raw || "{}") } catch (e) { return {} }
-    if (Array.isArray(parsed)) {
-        // migrate old flat array -> nfl
-        return parsed.length ? { nfl: parsed } : {}
-    }
-    if (parsed && typeof parsed === "object") {
-        // ensure values are arrays
-        var out = {}
-        for (var k in parsed) if (Array.isArray(parsed[k])) out[k] = parsed[k].slice()
-        return out
-    }
-    return {}
-}
 function isFav(favMapOrArray, abbr, leagueId) {
     if (Array.isArray(favMapOrArray)) return favMapOrArray.indexOf(abbr) >= 0
     if (!leagueId) return false
     var arr = favMapOrArray[leagueId] || []
     return arr.indexOf(abbr) >= 0
-}
-function toggleFavMap(favMap, leagueId, abbr) {
-    var out = {}
-    for (var k in favMap) out[k] = favMap[k].slice()
-    var arr = out[leagueId] ? out[leagueId].slice() : []
-    var idx = arr.indexOf(abbr)
-    if (idx >= 0) arr.splice(idx, 1); else arr.push(abbr)
-    if (arr.length) out[leagueId] = arr; else delete out[leagueId]
-    return out
 }
 function isLeagueFav(favMap, leagueId) { var arr = favMap["favoriteLeagues"] || []; return arr.indexOf(leagueId) >= 0 }
 // League ids with at least one favorited team — the bar covers these plus
@@ -128,15 +103,6 @@ function favLeagues(favMap) {
         if (leagueFor(k).id !== k) continue
         if (Array.isArray(favMap[k]) && favMap[k].length) out.push(k)
     }
-    return out
-}
-function toggleLeagueFav(favMap, leagueId) {
-    var out = {}
-    for (var k in favMap) out[k] = favMap[k].slice()
-    var arr = out["favoriteLeagues"] ? out["favoriteLeagues"].slice() : []
-    var idx = arr.indexOf(leagueId)
-    if (idx >= 0) arr.splice(idx, 1); else arr.push(leagueId)
-    if (arr.length) out["favoriteLeagues"] = arr; else delete out["favoriteLeagues"]
     return out
 }
 var leagueTier = { nfl:1, nba:1, mlb:1, nhl:1, wnba:1, mls:1, cfb:2, ncaam:2, ncaaw:2, epl:2, ucl:2, laliga:3, bundes:3, seriea:3, ligue1:3 }
@@ -247,29 +213,6 @@ var MAX_STR = 300              // default string cap in sanitize()
 var SANITIZE_DEPTH = 12        // max nesting depth retained
 var SANITIZE_NODES = 10000     // max total nodes retained
 
-// --- Favorites state (dconf) ---
-// Favorites persist through the desktop dconf daemon: the plugin only runs
-// fixed-argv `dconf read/write` (same trust shape as the curl/stat/dd baseline)
-// and holds no state-file paths of its own. Values are GVariant text-format
-// strings, so the JSON payload is wrapped in single quotes with \ and '
-// escaped; dconf-service serializes concurrent writers for us.
-var DCONF_FAVORITES = "/net/slowburnaz/omascore/favorites"
-function dconfEscape(s) {
-    return "'" + String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'"
-}
-function dconfUnescape(s) {
-    s = String(s || "").trim()
-    // dconf read returns canonical GVariant text: the wrapper may be ' or "
-    if (s.length >= 2 && ((s.charAt(0) === "'" && s.charAt(s.length - 1) === "'") || (s.charAt(0) === '"' && s.charAt(s.length - 1) === '"'))) s = s.slice(1, -1)
-    var out = ""
-    for (var i = 0; i < s.length; i++) {
-        var c = s.charAt(i)
-        if (c === "\\" && i + 1 < s.length) { i++; c = s.charAt(i) }
-        out += c
-    }
-    return out
-}
-
 // --- Shared live board (bar state) ---
 // Every per-screen panel instance imports this library into the SAME engine,
 // so a plain object here is shared process-wide. Each instance notes its
@@ -318,11 +261,9 @@ function resetKickoffMarks() { for (var k in kickoffNotified) delete kickoffNoti
 
 // --- Shared favorites state ---
 // All per-screen panels import this library into the SAME engine, so favorites
-// live here process-wide: every toggle or startup restore lands through
-// setFavorites, which notifies the other panels' watchers. dconf is
-// persistence only — panels write through on change and read once at startup;
-// there is no watch process. The source panel of a change is skipped (it
-// already applied its own UI update).
+// live here process-wide. They come from Config.js (favoriteTeams /
+// favoriteLeagues), loaded once at startup through setFavorites, which
+// notifies the other panels' watchers. The source panel is skipped.
 var favorites = {}
 var favWatchers = []
 function setFavorites(f, source) {
