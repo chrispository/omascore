@@ -1,3 +1,9 @@
+My re-design of Omascore. Leagues/favorites are set via config.
+
+![OmaScore redesign](screenshots/redesign.png)
+
+---
+
 # OmaScore
 
 Omarchy shell plugin that displays live scores for NFL, NBA, MLB, NHL, college football/basketball and soccer in the bar widget, with a details panel showing favorited teams pinned to the top, a league switcher, day/week navigation, and player stats grouped by stat name.
