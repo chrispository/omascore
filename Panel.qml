@@ -230,6 +230,23 @@ Panel {
   // wallpaper), which vanishes on this panel's solid popup surface — the
   // shell's own panels read bar.foreground (theme text) for that reason.
   readonly property color fg: root.bar ? root.bar.foreground : Color.foreground
+  // Two type roles: a proportional face for names and labels, the bar's
+  // monospace for figures (scores, clock, times, date numbers) so they line
+  // up in columns and read like a scoreboard.
+  readonly property string uiFont: "Noto Sans"
+  readonly property string figFont: root.bar ? root.bar.fontFamily : Style.font.family
+
+  // Leagues shown as chips (setting "visibleLeagues", default all). Stored
+  // as a list of league ids; an empty or unreadable value shows every league.
+  readonly property var visibleLeagues: {
+    var w = root.hostWidget
+    var v = (w && typeof w.setting === "function") ? w.setting("visibleLeagues", []) : []
+    if (typeof v === "string") v = v.split(",").map(function(s) { return s.trim() }).filter(function(s) { return s !== "" })
+    var out = []
+    if (v && v.length) for (var i = 0; i < v.length; i++) if (Model.leagueFor(String(v[i])).id === String(v[i])) out.push(String(v[i]))
+    return out
+  }
+  function leagueVisible(id) { return root.visibleLeagues.length === 0 || root.visibleLeagues.indexOf(id) >= 0 }
 
   property string currentLeagueId: Model.defaultLeagueId
   // Aggregate view id: shows today's favorited-team games across every league
@@ -302,7 +319,7 @@ Panel {
 
   function isFav(abbr, lg) { return Model.isFav(root.favorites, abbr, lg || root.currentLeagueId) }
   function applyFavorites() {
-    if (root.favView) root.refreshFavs()
+    if (root.favView) { root.refreshFavs(); root.loadFavSchedule(false) }
     else root.games = root.sorted(root.games)
     root.recount(); root.refreshBarFeed()
   }
@@ -400,7 +417,7 @@ Panel {
   function refreshSelected() {
     // favs view paints today's favorites from the shared board and tops up
     // every covered league — the day selector does not apply to it
-    if (root.favView) { root.refreshFavs(); root.refreshBarFeed(); return }
+    if (root.favView) { root.refreshFavs(); root.loadFavSchedule(false); root.refreshBarFeed(); return }
     var ds = root.weekDateStrs[root.selectedDay] || ""
     if (!ds) return
     root.lastFetchedDay = ds
@@ -414,18 +431,66 @@ Panel {
   // league's board slot. Rows are shallow copies tagged with _lg (their real
   // league) so detail, fav toggles, and labels resolve per-game — the shared
   // board objects are never mutated.
-  function sortedFav(list) {
-    var arr = list.slice()
-    var ord = { "in": 0, "pre": 1, "post": 2 }
-    arr.sort(function(a, b) {
-      var ao = ord[a.state] !== undefined ? ord[a.state] : 3
-      var bo = ord[b.state] !== undefined ? ord[b.state] : 3
-      if (ao !== bo) return ao - bo
-      return String(a.date) < String(b.date) ? -1 : (String(a.date) > String(b.date) ? 1 : 0)
-    })
-    return arr
+  // Favorites is an upcoming schedule: the next favCount games for every
+  // favorited team, in date order. Team schedules come from ESPN's
+  // teams/{abbr}/schedule (refetched at most every 15 min); today's rows are
+  // overlaid from the shared board so live scores stay current.
+  readonly property int favCount: 5
+  property var favSchedule: ({})        // event id -> game (tagged _lg)
+  property var favSchedQueue: []
+  property var favSchedJob: null
+  property double favSchedAt: 0
+  property string favSchedKey: ""
+  function loadFavSchedule(force) {
+    var teams = Model.favTeams(root.favorites)
+    var key = JSON.stringify(teams)
+    var now = new Date().getTime()
+    if (!force && key === root.favSchedKey && now - root.favSchedAt < 15 * 60 * 1000) return
+    if (key !== root.favSchedKey) root.favSchedule = ({})
+    root.favSchedKey = key; root.favSchedAt = now
+    var queue = []
+    for (var i = 0; i < teams.length; i++) {
+      var types = ["", "2", "3"]
+      for (var j = 0; j < types.length; j++) {
+        var args = Model.scheduleArgs(teams[i].lg, teams[i].abbr, types[j])
+        if (args) queue.push({ lg: teams[i].lg, args: args })
+      }
+    }
+    root.favSchedQueue = queue
+    root.pumpFavSchedule()
+  }
+  function pumpFavSchedule() {
+    if (favSchedProc.running || root.favSchedQueue.length === 0) return
+    var next = root.favSchedQueue.shift()
+    root.favSchedJob = next
+    favSchedProc.command = next.args
+    favSchedProc.running = true
+  }
+  Process {
+    id: favSchedProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var t = root.gated(text)
+        var job = root.favSchedJob
+        if (t !== null && job) {
+          try {
+            var list = Model.parseSchedule(t)
+            var m = {}
+            for (var k in root.favSchedule) m[k] = root.favSchedule[k]
+            for (var i = 0; i < list.length; i++) { list[i]._lg = job.lg; m[list[i].id] = list[i] }
+            root.favSchedule = m
+          } catch (e) {}
+        }
+        if (root.favView) root.refreshFavs()
+        root.pumpFavSchedule()
+      }
+    }
   }
   function refreshFavs() {
+    var byId = {}
+    for (var k in root.favSchedule) byId[k] = root.favSchedule[k]
     var out = []
     var slots = root.barSlots()
     for (var i = 0; i < slots.length; i++) {
@@ -437,10 +502,36 @@ Panel {
         var c = {}
         for (var k in g) c[k] = g[k]
         c._lg = slots[i].lg
-        out.push(c)
+        byId[c.id] = c
       }
     }
-    root.games = root.sortedFav(out)
+    // today onward (today's finals stay), date order, first favCount
+    var start = new Date(); start.setHours(0, 0, 0, 0)
+    for (var id in byId) {
+      var g2 = byId[id]
+      if (!(Model.isFav(root.favorites, g2.away.abbr, g2._lg) || Model.isFav(root.favorites, g2.home.abbr, g2._lg))) continue
+      if (g2.state === "in" || new Date(g2.date).getTime() >= start.getTime()) out.push(g2)
+    }
+    out.sort(function(a, b) { return new Date(a.date).getTime() - new Date(b.date).getTime() })
+    root.games = out.slice(0, root.favCount)
+  }
+  // Display names of favorited teams, from whatever games have loaded
+  readonly property string favTeamsLabel: {
+    var teams = Model.favTeams(root.favorites)
+    if (teams.length === 0) return ""
+    if (teams.length > 2) return root.trFn("%1 teams", teams.length)
+    var names = []
+    for (var i = 0; i < teams.length; i++) {
+      var nm = teams[i].abbr
+      for (var j = 0; j < root.games.length; j++) {
+        var g = root.games[j]
+        if (g._lg !== teams[i].lg) continue
+        if (g.away.abbr === teams[i].abbr) { nm = g.away.name; break }
+        if (g.home.abbr === teams[i].abbr) { nm = g.home.name; break }
+      }
+      names.push(nm)
+    }
+    return names.join(", ")
   }
   function showDetail(game) {
     if (!game || !Model.validEventId(game.id)) return
@@ -721,10 +812,37 @@ Panel {
     if (root.listVisible && root.cursorIndex >= 0 && root.cursorIndex < root.filteredGames.length)
       root.showDetail(root.filteredGames[root.cursorIndex])
   }
+  // Full status line (notifications, detail header): date + time before
+  // start, ESPN's short detail after.
   function gameStatus(g) {
     if (!g) return ""
     var base = (g.state === "pre" && g.date) ? Qt.formatDateTime(new Date(g.date), Qt.DefaultLocaleShortDate) : (g.detail || "")
     return base + (root.showOdds && g.state === "pre" && g.odds ? "  \u00b7  " + g.odds : "")
+  }
+  function isPostponed(g) { return !!g && /postpon|cancel|suspend|delay/i.test(g.detail || "") }
+  function startTime(g) { return g && g.date ? Qt.formatTime(new Date(g.date), Locale.ShortFormat) : "" }
+  // List status column: [main, sub]. Pre-game = start time only (the day is
+  // already picked in the strip); live = clock over period ("8:14 - 2nd").
+  function statusLines(g) {
+    if (!g) return ["", ""]
+    if (root.isPostponed(g)) return [root.trFn("PPD"), ""]
+    if (g.state === "pre") return [root.startTime(g), ""]
+    var d = String(g.detail || "")
+    if (g.state === "in") {
+      var parts = d.split(" - ")
+      if (parts.length === 2) return [parts[0], parts[1]]
+    }
+    return [d, ""]
+  }
+  // Favorites date line: "TODAY · FRI SEP 25"
+  function dayTag(g) {
+    if (!g || !g.date) return ["", ""]
+    var d = new Date(g.date)
+    var ds = Model.ymd(d)
+    var tm = new Date(); tm.setDate(tm.getDate() + 1)
+    var rel = ds === root.todayYmd ? root.trFn("Today") : (ds === Model.ymd(tm) ? root.trFn("Tomorrow") : "")
+    var lbl = (root.dayLabels[d.getDay()] || "") + " " + I18n.tr(Model.monthLabels[d.getMonth()]) + " " + d.getDate()
+    return [rel.toUpperCase(), lbl.toUpperCase()]
   }
   function periodChip(n) {
     var lbl = Model.periodLabelFor((root.selectedGame && root.selectedGame._lg) || root.currentLeagueId)
@@ -766,9 +884,9 @@ Panel {
         if (root.weekFetchLeague !== root.currentLeagueId) return
         var t = root.gated(text)
         if (t === null) return
+        // dots only: the selected day stays put (today on open) even when
+        // it has no games — the empty-state hint points at the next one
         root.hasGames = Model.parseWeekRange(t, root.weekDateStrs)
-        var nxt = Model.nextSelectedDay(root.hasGames, root.selectedDay)
-        if (nxt >= 0) { root.selectedDay = nxt; root.refreshSelected() }
       }
     }
   }
@@ -844,9 +962,9 @@ Panel {
     var w = root.hostWidget
     if (!w || typeof w.setting !== "function") return
     var saved = w.setting("lastLeague", "")
-    if (!saved) return
     root.leagueRestored = true
-    if (saved !== root.currentLeagueId && Model.leagueFor(saved).id === saved) root.setLeague(saved)
+    if (saved && saved !== root.currentLeagueId && Model.leagueFor(saved).id === saved && root.leagueVisible(saved)) root.setLeague(saved)
+    else if (!root.favView && !root.leagueVisible(root.currentLeagueId)) root.setLeague(root.visibleLeagues[0])
   }
   function initForCurrent() { root.restoreFavorites(); root.restoreLastLeague(); root.initWeek() }
   Component.onCompleted: {
@@ -860,10 +978,105 @@ Panel {
     if (i >= 0) Model.favWatchers.splice(i, 1)
   }
 
+  // Every open lands on today in the current week — a day or week picked
+  // earlier (possibly yesterday) never carries over. An open game detail is
+  // left alone.
   onOpenedChanged: if (root.opened) {
     root.todayYmd = Model.ymd(new Date())
     root.restoreLastLeague()
-    if (!root.weekStart) root.initWeek(); else root.refreshSelected()
+    if (root.selectedGame) root.refreshSelected(); else root.initWeek()
+  }
+
+  // One team's line in a game card: logo · code · name (+ fav star) · score.
+  // Fixed column widths so every card lines up into the same grid.
+  component TeamLine: RowLayout {
+    id: line
+    property var game: null
+    property string side: "away"
+    property bool dimmed: false
+    property bool rowHovered: false
+    readonly property var team: game ? game[side] : null
+    readonly property string lg: game ? (game._lg || root.currentLeagueId) : root.currentLeagueId
+    readonly property bool fav: team ? root.isFav(team.abbr, lg) : false
+    readonly property bool showScore: !!game && game.state !== "pre" && !root.isPostponed(game)
+    readonly property bool leading: !!game && game.state !== "pre" && root.leads(game, side)
+    spacing: Style.space(8)
+    Layout.preferredHeight: Style.space(28)
+    opacity: dimmed ? 0.45 : 1
+
+    Item {
+      Layout.preferredWidth: Style.space(22)
+      Layout.preferredHeight: Style.space(22)
+      Layout.alignment: Qt.AlignVCenter
+      Image {
+        anchors.fill: parent
+        asynchronous: true
+        cache: true
+        fillMode: Image.PreserveAspectFit
+        sourceSize.width: 44
+        source: Model.safeMedia(line.team ? line.team.logo : "")
+      }
+    }
+    Text {
+      textFormat: Text.PlainText
+      Layout.preferredWidth: Style.space(34)
+      Layout.alignment: Qt.AlignVCenter
+      text: line.team ? line.team.abbr : ""
+      color: root.fg
+      opacity: 0.58
+      font.family: root.uiFont
+      font.pixelSize: Style.font.caption
+      font.weight: Font.Bold
+      font.letterSpacing: 0.6
+    }
+    Item {
+      Layout.fillWidth: true
+      Layout.preferredHeight: nameText.implicitHeight
+      Layout.alignment: Qt.AlignVCenter
+      Text {
+        id: nameText
+        textFormat: Text.PlainText
+        anchors.verticalCenter: parent.verticalCenter
+        width: Math.min(implicitWidth, parent.width - starText.width - Style.space(6))
+        text: line.team ? line.team.name : ""
+        color: root.fg
+        font.family: root.uiFont
+        font.pixelSize: Style.font.subtitle
+        font.weight: Font.Medium
+        elide: Text.ElideRight
+        HoverHandler { id: nameHover }
+        PanelToolTip { visible: nameHover.hovered && nameText.truncated; text: nameText.text }
+      }
+      Text {
+        id: starText
+        textFormat: Text.PlainText
+        x: nameText.width + Style.space(5)
+        anchors.verticalCenter: parent.verticalCenter
+        visible: line.fav || line.rowHovered
+        text: line.fav ? "\u2605" : "\u2606"
+        color: line.fav ? Color.accent : root.fg
+        opacity: line.fav ? 1 : 0.5
+        font.pixelSize: Style.font.caption
+        MouseArea {
+          anchors.fill: parent
+          anchors.margins: -Style.space(4)
+          cursorShape: Qt.PointingHandCursor
+          onClicked: if (line.team) root.toggleFav(line.team.abbr, line.lg)
+        }
+      }
+    }
+    Text {
+      textFormat: Text.PlainText
+      visible: line.showScore
+      Layout.preferredWidth: Style.space(24)
+      Layout.alignment: Qt.AlignVCenter
+      horizontalAlignment: Text.AlignRight
+      text: line.team ? (line.team.score || "0") : ""
+      color: line.leading ? Color.accent : root.fg
+      font.family: root.figFont
+      font.pixelSize: Style.font.heading
+      font.bold: true
+    }
   }
 
   KeyboardPanel {
@@ -911,8 +1124,9 @@ Panel {
               id: heroIcon
               text: "\uf091"
               color: root.fg
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.display
+              opacity: 0.58
+              font.family: root.figFont
+              font.pixelSize: Style.font.title
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
             }
@@ -920,11 +1134,11 @@ Panel {
               textFormat: Text.PlainText
               text: "OmaScore"
               color: root.fg
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.title
-              font.bold: true
+              font.family: root.uiFont
+              font.pixelSize: Style.font.subtitle
+              font.weight: Font.Bold
               anchors.left: heroIcon.right
-              anchors.leftMargin: Style.space(14)
+              anchors.leftMargin: Style.space(8)
               anchors.verticalCenter: parent.verticalCenter
             }
             Button {
@@ -937,7 +1151,8 @@ Panel {
               tooltipText: root.trFn("Refresh")
               foreground: root.fg
               accent: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.figFont
+              iconSize: Style.font.body
               onClicked: root.refresh()
             }
             Button {
@@ -945,12 +1160,13 @@ Panel {
               anchors.right: refreshButton.left
               anchors.rightMargin: Style.space(4)
               anchors.verticalCenter: parent.verticalCenter
-              visible: root.listVisible
+              visible: root.listVisible && !root.favView
               iconText: ""
               tooltipText: root.trFn("Show Today")
               foreground: root.fg
               accent: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.figFont
+              iconSize: Style.font.body
               onClicked: root.goToday()
             }
             Button {
@@ -964,7 +1180,8 @@ Panel {
               tooltipText: root.trFn("Settings")
               foreground: root.showSettings ? Color.accent : root.fg
               accent: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.figFont
+              iconSize: Style.font.body
               onClicked: {
                 if (root.showSettings) { root.showSettings = false; return }
                 root.showSettings = true
@@ -989,12 +1206,13 @@ Panel {
               Repeater {
                 // "★ Favorites" is an aggregate view, not a league: no
                 // league-fav star, week dots, or lastLeague persistence
-                model: [{ id: "favs", label: "\u2605 " + root.trFn("Favorites") }].concat(Model.sortedLeagues(Model.leagues, root.favorites))
+                model: [{ id: "favs", label: "\u2605 " + root.trFn("Favorites") }].concat(Model.sortedLeagues(Model.leagues, root.favorites).filter(function(l) { return root.leagueVisible(l.id) }))
                 delegate: Rectangle {
                   required property var modelData
-                  width: row.implicitWidth + Style.space(16)
-                  height: Style.space(28)
-                  radius: Style.space(14)
+                  width: row.implicitWidth + Style.space(22)
+                  height: Style.space(26)
+                  anchors.verticalCenter: parent.verticalCenter
+                  radius: Style.space(13)
                   color: root.currentLeagueId == modelData.id ? Color.accent : "transparent"
                   border.width: root.currentLeagueId == modelData.id ? 0 : 1
                   border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.18)
@@ -1008,9 +1226,10 @@ Panel {
                       id: leagueText
                       text: modelData.label
                       color: root.currentLeagueId == modelData.id ? Color.background : root.fg
-                      font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                      font.pixelSize: Style.font.caption
-                      font.bold: root.currentLeagueId == modelData.id
+                      opacity: root.currentLeagueId == modelData.id ? 1 : 0.7
+                      font.family: root.uiFont
+                      font.pixelSize: Style.font.bodySmall
+                      font.weight: root.currentLeagueId == modelData.id ? Font.Bold : Font.Medium
                     }
                     Text {
                       textFormat: Text.PlainText
@@ -1032,18 +1251,18 @@ Panel {
           }
 
           RowLayout {
-            width: parent.width - Style.space(20)
-            anchors.horizontalCenter: parent.horizontalCenter
-            spacing: Style.space(4)
+            width: parent.width
+            spacing: Style.space(2)
             visible: root.weekDates.length === 7 && root.listVisible && !root.favView
 
             Button {
-              Layout.preferredWidth: Style.space(28)
+              Layout.preferredWidth: Style.space(20)
               Layout.preferredHeight: Style.space(28)
+              horizontalPadding: 0
               iconText: "\u2039"
-              foreground: root.fg
+              foreground: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.6)
               accent: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.uiFont
               onClicked: root.shiftWeek(-7)
             }
 
@@ -1052,12 +1271,11 @@ Panel {
               delegate: Rectangle {
                 required property int index
                 Layout.fillWidth: true
-                Layout.preferredHeight: Style.space(52)
-                radius: Style.space(6)
-                color: root.selectedDay === index ? Color.accent : "transparent"
-                border.width: root.selectedDay === index ? 0 : 1
-                border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.18)
+                Layout.preferredHeight: Style.space(54)
+                radius: Style.space(10)
+                color: root.selectedDay === index ? Color.accent : (dayHover.hovered ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06) : "transparent")
                 clip: true
+                HoverHandler { id: dayHover }
 
                 MouseArea {
                   anchors.fill: parent
@@ -1071,12 +1289,13 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     anchors.horizontalCenter: parent.horizontalCenter
-                    text: root.dayLabels[index]
-                    color: root.selectedDay === index ? Color.background : root.fg
-                    opacity: root.selectedDay === index ? 1 : 0.7
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    text: (root.dayLabels[index] || "").toUpperCase()
+                    color: root.selectedDay === index ? Color.background : (index === root.todayIndex ? Color.accent : root.fg)
+                    opacity: root.selectedDay === index || index === root.todayIndex ? 1 : 0.58
+                    font.family: root.uiFont
                     font.pixelSize: Style.font.caption
-                    font.bold: root.selectedDay === index
+                    font.weight: Font.Medium
+                    font.letterSpacing: 0.6
                   }
 
                   Text {
@@ -1084,43 +1303,33 @@ Panel {
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: root.weekDates.length === 7 ? root.weekDates[index].getDate() : ""
                     color: root.selectedDay === index ? Color.background : root.fg
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                    font.pixelSize: Style.font.bodySmall
+                    font.family: root.figFont
+                    font.pixelSize: Style.font.heading
                     font.bold: true
                   }
 
                   Rectangle {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    visible: root.hasGames[index]
-                    width: 6
-                    height: 6
-                    radius: 3
+                    // opacity, not visible: keeps every cell's column the same height
+                    opacity: root.hasGames[index] ? 1 : 0
+                    width: 4
+                    height: 4
+                    radius: 2
                     color: root.selectedDay === index ? Color.background : Color.accent
-                    opacity: root.selectedDay === index ? 1 : 0.9
                   }
                 }
 
-                // today marker, independent of the selection
-                Rectangle {
-                  anchors.horizontalCenter: parent.horizontalCenter
-                  anchors.bottom: parent.bottom
-                  width: parent.width / 2
-                  height: 2
-                  radius: 1
-                  visible: index === root.todayIndex && root.selectedDay !== index
-                  color: root.fg
-                  opacity: 0.55
-                }
               }
             }
 
             Button {
-              Layout.preferredWidth: Style.space(28)
+              Layout.preferredWidth: Style.space(20)
               Layout.preferredHeight: Style.space(28)
+              horizontalPadding: 0
               iconText: "\u203A"
-              foreground: root.fg
+              foreground: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.6)
               accent: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.uiFont
               onClicked: root.shiftWeek(7)
             }
           }
@@ -1129,23 +1338,11 @@ Panel {
             textFormat: Text.PlainText
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
-            text: root.weekLabelText
-            color: root.fg
-            opacity: 0.5
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
-            visible: root.weekDates.length === 7 && root.listVisible && !root.favView
-          }
-
-          Text {
-            textFormat: Text.PlainText
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
-            text: root.trFn("No favorite games today \u2014 tap \u2606 on a team to follow it")
+            text: root.trFn("No upcoming favorite games \u2014 tap \u2606 on a team to follow it")
             visible: root.favView && root.games.length === 0 && root.listVisible
             color: root.fg
             opacity: 0.6
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.family: root.uiFont
             font.pixelSize: Style.font.body
             wrapMode: Text.WordWrap
           }
@@ -1164,7 +1361,7 @@ Panel {
             visible: root.lastError !== "" && root.games.length === 0 && root.listVisible
             color: root.lastError === "No games scheduled" ? root.fg : root.urgentColor
             opacity: root.lastError === "No games scheduled" ? 0.6 : 1
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.family: root.uiFont
             font.pixelSize: Style.font.body
             elide: Text.ElideRight
           }
@@ -1219,14 +1416,37 @@ Panel {
             visible: root.games.length > 0 && root.shownGames.length === 0 && root.listVisible
             color: root.fg
             opacity: 0.5
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.family: root.uiFont
             font.pixelSize: Style.font.body
+          }
+
+          RowLayout {
+            width: parent.width
+            visible: root.listVisible && root.favView && root.favTeamsLabel !== ""
+            Text {
+              textFormat: Text.PlainText
+              Layout.fillWidth: true
+              text: root.favTeamsLabel
+              color: root.fg
+              font.family: root.uiFont
+              font.pixelSize: Style.font.subtitle
+              font.weight: Font.Bold
+              elide: Text.ElideRight
+            }
+            Text {
+              textFormat: Text.PlainText
+              text: root.trFn("Next %1 games", root.favCount)
+              color: root.fg
+              opacity: 0.58
+              font.family: root.uiFont
+              font.pixelSize: Style.font.caption
+            }
           }
 
           TextField {
             id: filterField
             width: parent.width
-            visible: root.listVisible && root.shownGames.length > 1
+            visible: root.listVisible && !root.favView && root.shownGames.length > 4
             height: visible ? implicitHeight : 0
             placeholderText: root.trFn("Filter teams\u2026")
             text: root.filterText
@@ -1234,7 +1454,7 @@ Panel {
             onAccepted: filterField.focus = false
             foreground: root.fg
             accent: Color.accent
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.family: root.uiFont
           }
 
           Text {
@@ -1245,7 +1465,7 @@ Panel {
             visible: root.listVisible && root.shownGames.length > 0 && root.filteredGames.length === 0
             color: root.fg
             opacity: 0.5
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.family: root.uiFont
             font.pixelSize: Style.font.body
           }
 
@@ -1255,7 +1475,7 @@ Panel {
             height: contentHeight
             interactive: false
             clip: true
-            spacing: Style.space(14)
+            spacing: root.favView ? Style.space(16) : Style.space(10)
             visible: root.listVisible
             model: gamesModel
 
@@ -1266,174 +1486,160 @@ Panel {
             remove: Transition { NumberAnimation { property: "opacity"; to: 0; duration: 120 } }
 
             delegate: Column {
+              id: gameItem
               required property var game
               required property int index
               readonly property var modelData: game
+              readonly property bool isPre: modelData && modelData.state === "pre"
               readonly property bool isFinal: modelData && modelData.state === "post"
+              readonly property bool isLive: modelData && modelData.state === "in"
+              readonly property bool ppd: root.isPostponed(modelData)
               readonly property bool awayLeads: modelData ? root.leads(modelData, "away") : false
               readonly property bool homeLeads: modelData ? root.leads(modelData, "home") : false
+              readonly property var status: root.statusLines(modelData)
               visible: root.listVisible
               width: parent.width
-              spacing: Style.space(4)
+              spacing: Style.space(6)
 
-              // anchor host: positioner Columns forbid anchors on direct children,
-              // so flashRect anchors to this zero-height flow item instead
-              Item {
+              // Favorites: date line above each game, start time on the right
+              RowLayout {
                 width: parent.width
-                implicitHeight: 0
-                Rectangle {
-                  id: flashRect
+                visible: root.favView
+                spacing: Style.space(8)
+                Text {
+                  textFormat: Text.PlainText
+                  visible: text !== ""
+                  text: root.dayTag(modelData)[0]
+                  color: Color.accent
+                  font.family: root.uiFont
+                  font.pixelSize: Style.font.caption
+                  font.weight: Font.Bold
+                  font.letterSpacing: 0.8
+                }
+                Text {
+                  textFormat: Text.PlainText
+                  text: root.dayTag(modelData)[1] + (Model.favLeagues(root.favorites).length > 1 && modelData && modelData._lg ? "  \u00b7  " + root.leagueLabel(modelData._lg) : "")
+                  color: root.fg
+                  opacity: 0.58
+                  font.family: root.uiFont
+                  font.pixelSize: Style.font.caption
+                  font.weight: Font.Bold
+                  font.letterSpacing: 0.8
+                }
+                Item { Layout.fillWidth: true }
+                Text {
+                  textFormat: Text.PlainText
+                  visible: gameItem.isPre && !gameItem.ppd
+                  text: root.startTime(modelData)
+                  color: root.fg
+                  font.family: root.figFont
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+              }
+
+              Rectangle {
+                id: card
+                width: parent.width
+                height: cardRow.implicitHeight + Style.space(12)
+                radius: Style.space(8)
+                readonly property string gid: modelData ? modelData.id : ""
+                readonly property bool flashing: root.flashTick >= 0 && (root.scoreFlash[gid] || 0) > 0 && new Date().getTime() - root.scoreFlash[gid] < 700
+                onFlashingChanged: if (flashing) flashExpire.restart()
+                color: gameItem.index === root.cursorIndex
+                  ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08)
+                  : (flashing ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.28)
+                  : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, cardHover.hovered ? 0.06 : 0.035))
+                Behavior on color { ColorAnimation { duration: 350 } }
+                Timer {
+                  id: flashExpire
+                  interval: 700
+                  onTriggered: root.flashTick++
+                }
+                HoverHandler { id: cardHover }
+                MouseArea {
                   anchors.fill: parent
-                  anchors.margins: -Style.space(4)
-                  z: -1
-                  readonly property string gid: modelData ? modelData.id : ""
-                  readonly property bool flashing: root.flashTick >= 0 && (root.scoreFlash[gid] || 0) > 0 && new Date().getTime() - root.scoreFlash[gid] < 700
-                  onFlashingChanged: if (flashing) flashExpire.restart()
-                  visible: index === root.cursorIndex || flashing || color.a > 0 || (modelData && modelData.state === "in")
-                  color: index === root.cursorIndex
-                    ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.08)
-                    : (flashing ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.28) : "transparent")
-                  radius: Style.space(6)
-                  Behavior on color { ColorAnimation { duration: 350 } }
-                  Timer {
-                    id: flashExpire
-                    interval: 700
-                    onTriggered: root.flashTick++
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.showDetail(modelData)
+                }
+                // live-only pulse strip: sweep the list for "on now" without reading status text
+                Rectangle {
+                  anchors.left: parent.left
+                  anchors.top: parent.top
+                  anchors.bottom: parent.bottom
+                  anchors.topMargin: Style.space(6)
+                  anchors.bottomMargin: Style.space(6)
+                  width: 3
+                  radius: 1.5
+                  visible: gameItem.isLive
+                  color: root.urgentColor
+                  SequentialAnimation on opacity {
+                    running: gameItem.isLive
+                    loops: Animation.Infinite
+                    NumberAnimation { to: 0.3; duration: 700; easing.type: Easing.InOutQuad }
+                    NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutQuad }
                   }
-                  // live-only pulse strip: sweep the list for "on now" without reading status text
+                }
+
+                // grid: logo 22 · code 34 · name (fill) · score 24 | status 68
+                RowLayout {
+                  id: cardRow
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(10)
+                  anchors.rightMargin: Style.space(10)
+                  spacing: Style.space(14)
+
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 0
+                    TeamLine { Layout.fillWidth: true; game: modelData; side: "away"; dimmed: gameItem.isFinal && gameItem.homeLeads; rowHovered: cardHover.hovered }
+                    TeamLine { Layout.fillWidth: true; game: modelData; side: "home"; dimmed: gameItem.isFinal && gameItem.awayLeads; rowHovered: cardHover.hovered }
+                  }
+
                   Rectangle {
-                    anchors.left: parent.left
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    width: 3
-                    radius: 1.5
-                    visible: modelData && modelData.state === "in"
-                    color: root.urgentColor
-                    SequentialAnimation on opacity {
-                      running: parent.visible
-                      loops: Animation.Infinite
-                      NumberAnimation { to: 0.3; duration: 700; easing.type: Easing.InOutQuad }
-                      NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutQuad }
+                    visible: statusCol.visible
+                    Layout.preferredWidth: 1
+                    Layout.fillHeight: true
+                    Layout.topMargin: Style.space(2)
+                    Layout.bottomMargin: Style.space(2)
+                    color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
+                  }
+
+                  ColumnLayout {
+                    id: statusCol
+                    // Favorites shows the start time on the date line instead
+                    visible: !(root.favView && gameItem.isPre && !gameItem.ppd)
+                    Layout.preferredWidth: Style.space(68)
+                    Layout.maximumWidth: Style.space(68)
+                    spacing: Style.space(2)
+                    Text {
+                      textFormat: Text.PlainText
+                      Layout.fillWidth: true
+                      horizontalAlignment: Text.AlignRight
+                      text: gameItem.status[0]
+                      color: gameItem.isLive ? root.urgentColor : root.fg
+                      opacity: gameItem.isFinal || gameItem.ppd ? 0.6 : 1
+                      font.family: gameItem.isLive || gameItem.isPre ? root.figFont : root.uiFont
+                      font.pixelSize: Style.font.subtitle
+                      font.bold: true
+                      elide: Text.ElideRight
+                    }
+                    Text {
+                      textFormat: Text.PlainText
+                      Layout.fillWidth: true
+                      horizontalAlignment: Text.AlignRight
+                      visible: text !== ""
+                      text: gameItem.status[1]
+                      color: root.fg
+                      opacity: 0.58
+                      font.family: root.uiFont
+                      font.pixelSize: Style.font.caption
+                      font.weight: Font.Medium
+                      elide: Text.ElideRight
                     }
                   }
-                }
-              }
-
-              TapHandler {
-                onTapped: root.showDetail(modelData)
-              }
-
-              RowLayout {
-                width: parent.width
-                spacing: Style.spacing.controlGap
-                visible: modelData && modelData.away
-                Rectangle {
-                  visible: modelData && (modelData.away.logo || "") !== ""
-                  opacity: isFinal && homeLeads ? 0.45 : 1
-                  width: Style.space(20)
-                  height: Style.space(20)
-                  Layout.preferredWidth: Style.space(20)
-                  Layout.preferredHeight: Style.space(20)
-                  Layout.alignment: Qt.AlignVCenter
-                  radius: Style.space(4)
-                  color: "transparent"
-                  clip: true
-
-                  Image {
-                    id: awayLogo
-                    anchors.fill: parent
-                    asynchronous: true
-                    cache: true
-                    fillMode: Image.PreserveAspectFit
-                    sourceSize.width: 40
-                    source: Model.safeMedia(modelData && modelData.away ? modelData.away.logo : "")
-                  }
-                }
-                Button {
-                  iconText: modelData && root.isFav(modelData.away.abbr, modelData._lg) ? "\u2605" : "\u2606"
-                  foreground: modelData && root.isFav(modelData.away.abbr, modelData._lg) ? Color.accent : root.fg
-                  accent: Color.accent
-                  fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-                  onClicked: if (modelData) root.toggleFav(modelData.away.abbr, modelData._lg)
-                }
-                Text {
-                  textFormat: Text.PlainText
-                  Layout.fillWidth: true
-                  text: modelData ? modelData.away.abbr + "   " + modelData.away.name : ""
-                  color: root.fg
-                  opacity: isFinal && homeLeads ? 0.45 : 1
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                  font.pixelSize: Style.font.body
-                  font.bold: modelData && root.leads(modelData, "away")
-                  elide: Text.ElideRight
-                  HoverHandler { id: hoverGameAway }
-                  PanelToolTip { visible: hoverGameAway.hovered && parent.truncated; text: parent.text }
-                }
-                Text {
-                  textFormat: Text.PlainText
-                  text: modelData && modelData.away ? modelData.away.score || "-" : "-"
-                  color: modelData && root.leads(modelData, "away") ? Color.accent : root.fg
-                  opacity: isFinal && homeLeads ? 0.45 : 1
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                  font.pixelSize: Style.font.body
-                  font.bold: true
-                }
-              }
-
-              RowLayout {
-                width: parent.width
-                spacing: Style.spacing.controlGap
-                visible: modelData && modelData.home
-                Rectangle {
-                  visible: modelData && (modelData.home.logo || "") !== ""
-                  opacity: isFinal && awayLeads ? 0.45 : 1
-                  width: Style.space(20)
-                  height: Style.space(20)
-                  Layout.preferredWidth: Style.space(20)
-                  Layout.preferredHeight: Style.space(20)
-                  Layout.alignment: Qt.AlignVCenter
-                  radius: Style.space(4)
-                  color: "transparent"
-                  clip: true
-
-                  Image {
-                    id: homeLogo
-                    anchors.fill: parent
-                    asynchronous: true
-                    cache: true
-                    fillMode: Image.PreserveAspectFit
-                    sourceSize.width: 40
-                    source: Model.safeMedia(modelData && modelData.home ? modelData.home.logo : "")
-                  }
-                }
-                Button {
-                  iconText: modelData && root.isFav(modelData.home.abbr, modelData._lg) ? "\u2605" : "\u2606"
-                  foreground: modelData && root.isFav(modelData.home.abbr, modelData._lg) ? Color.accent : root.fg
-                  accent: Color.accent
-                  fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-                  onClicked: if (modelData) root.toggleFav(modelData.home.abbr, modelData._lg)
-                }
-                Text {
-                  textFormat: Text.PlainText
-                  Layout.fillWidth: true
-                  text: modelData ? modelData.home.abbr + "   " + modelData.home.name : ""
-                  color: root.fg
-                  opacity: isFinal && awayLeads ? 0.45 : 1
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                  font.pixelSize: Style.font.body
-                  font.bold: modelData && root.leads(modelData, "home")
-                  elide: Text.ElideRight
-                  HoverHandler { id: hoverGameHome }
-                  PanelToolTip { visible: hoverGameHome.hovered && parent.truncated; text: parent.text }
-                }
-                Text {
-                  textFormat: Text.PlainText
-                  text: modelData && modelData.home ? modelData.home.score || "-" : "-"
-                  color: modelData && root.leads(modelData, "home") ? Color.accent : root.fg
-                  opacity: isFinal && awayLeads ? 0.45 : 1
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                  font.pixelSize: Style.font.body
-                  font.bold: true
                 }
               }
 
@@ -1441,15 +1647,14 @@ Panel {
                 textFormat: Text.PlainText
                 width: parent.width
                 horizontalAlignment: Text.AlignRight
-                text: (root.favView && modelData && modelData._lg ? root.leagueLabel(modelData._lg) + " \u00b7 " : "") + root.gameStatus(modelData)
-                color: modelData ? root.statusColor(modelData.state) : root.fg
-                opacity: modelData && modelData.state === "in" ? 1.0 : 0.6
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                visible: root.showOdds && gameItem.isPre && !!(modelData && modelData.odds)
+                text: modelData && modelData.odds ? modelData.odds : ""
+                color: root.fg
+                opacity: 0.5
+                font.family: root.uiFont
                 font.pixelSize: Style.font.caption
-                font.bold: modelData && modelData.state === "in"
+                elide: Text.ElideRight
               }
-
-              PanelSeparator { foreground: root.fg }
             }
           }
           Column {
@@ -1465,7 +1670,7 @@ Panel {
                 text: root.trFn("Back")
                 foreground: root.fg
                 accent: Color.accent
-                fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                fontFamily: root.uiFont
                 onClicked: root.showSettings = false
               }
               Text {
@@ -1473,7 +1678,7 @@ Panel {
                 Layout.fillWidth: true
                 text: root.trFn("Settings")
                 color: root.fg
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.family: root.uiFont
                 font.pixelSize: Style.font.subtitle
                 font.bold: true
                 elide: Text.ElideRight
@@ -1486,7 +1691,7 @@ Panel {
               width: parent.width
               text: root.trFn("Notifications")
               foreground: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.uiFont
             }
 
             Toggle {
@@ -1496,7 +1701,7 @@ Panel {
               checked: root.notifyEnabled
               foreground: root.fg
               accent: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.uiFont
               onClicked: root.setSetting("notifications", !root.notifyEnabled)
             }
 
@@ -1507,7 +1712,7 @@ Panel {
               checked: root.notifyFinalsOnly
               foreground: root.fg
               accent: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.uiFont
               onClicked: root.setSetting("notifyFinalsOnly", !root.notifyFinalsOnly)
             }
 
@@ -1523,7 +1728,7 @@ Panel {
               ]
               foreground: root.fg
               accent: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.uiFont
               onChanged: function(v) { root.setSetting("kickoffWindow", parseInt(v)) }
             }
 
@@ -1533,7 +1738,24 @@ Panel {
               width: parent.width
               text: root.trFn("Display")
               foreground: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.uiFont
+            }
+
+            // league chips to show; none selected = all
+            MultiSelect {
+              width: parent.width
+              label: root.trFn("Visible leagues")
+              values: root.visibleLeagues.length ? root.visibleLeagues : Model.leagues.map(function(l) { return l.id })
+              options: Model.leagues.map(function(l) { return { value: l.id, label: l.label } })
+              foreground: root.fg
+              accent: Color.accent
+              fontFamily: root.uiFont
+              onChanged: function(v) {
+                var arr = []
+                for (var i = 0; i < v.length; i++) arr.push(String(v[i]))
+                root.setSetting("visibleLeagues", arr.length === Model.leagues.length ? [] : arr)
+                if (!root.favView && !root.leagueVisible(root.currentLeagueId) && arr.length) root.setLeague(arr[0])
+              }
             }
 
             Toggle {
@@ -1543,7 +1765,7 @@ Panel {
               checked: root.showOdds
               foreground: root.fg
               accent: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.uiFont
               onClicked: root.setSetting("showOdds", !root.showOdds)
             }
 
@@ -1554,7 +1776,7 @@ Panel {
               checked: root.hideFinished
               foreground: root.fg
               accent: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.uiFont
               onClicked: root.setSetting("hideFinished", !root.hideFinished)
             }
 
@@ -1570,7 +1792,7 @@ Panel {
               ]
               foreground: root.fg
               accent: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.uiFont
               onChanged: function(v) { root.setSetting("barMode", v) }
             }
 
@@ -1580,7 +1802,7 @@ Panel {
               width: parent.width
               text: root.trFn("General")
               foreground: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.uiFont
             }
 
             Dropdown {
@@ -1596,7 +1818,7 @@ Panel {
               ]
               foreground: root.fg
               accent: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.uiFont
               onChanged: function(v) { root.setSetting("language", v) }
             }
           }
@@ -1614,7 +1836,7 @@ Panel {
                 text: root.trFn("Back")
                 foreground: root.fg
                 accent: Color.accent
-                fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                fontFamily: root.uiFont
                 onClicked: root.closeDetail()
               }
               Row {
@@ -1624,7 +1846,7 @@ Panel {
                   textFormat: Text.PlainText
                   text: root.selectedGame ? root.selectedGame.away.abbr : ""
                   color: root.selectedGame && (root.selectedGame.away.color || "") !== "" ? root.teamColor(root.selectedGame.away.color) : root.fg
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.family: root.uiFont
                   font.pixelSize: Style.font.subtitle
                   font.bold: true
                 }
@@ -1633,7 +1855,7 @@ Panel {
                   text: "@"
                   color: root.fg
                   opacity: 0.5
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.family: root.uiFont
                   font.pixelSize: Style.font.subtitle
                   font.bold: true
                 }
@@ -1641,7 +1863,7 @@ Panel {
                   textFormat: Text.PlainText
                   text: root.selectedGame ? root.selectedGame.home.abbr : ""
                   color: root.selectedGame && (root.selectedGame.home.color || "") !== "" ? root.teamColor(root.selectedGame.home.color) : root.fg
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.family: root.uiFont
                   font.pixelSize: Style.font.subtitle
                   font.bold: true
                 }
@@ -1651,7 +1873,7 @@ Panel {
                 text: root.selectedGame ? root.selectedGame.detail : ""
                 color: root.statusColor(root.selectedGame ? root.selectedGame.state : "")
                 opacity: root.selectedGame && root.selectedGame.state === "in" ? 1 : 0.6
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.family: root.uiFont
                 font.pixelSize: Style.font.caption
               }
             }
@@ -1686,7 +1908,7 @@ Panel {
                   anchors.horizontalCenter: parent.horizontalCenter
                   text: root.detailTeams && root.detailTeams.away ? root.detailTeams.away.abbr : ""
                   color: root.fg
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.family: root.uiFont
                   font.pixelSize: Style.font.bodySmall
                   font.bold: true
                 }
@@ -1697,7 +1919,7 @@ Panel {
                     textFormat: Text.PlainText
                     text: root.selectedGame && root.selectedGame.away ? root.selectedGame.away.score : ""
                     color: root.detailFlashing || root.leads(root.selectedGame, "away") ? Color.accent : root.fg
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.family: root.uiFont
                     font.pixelSize: Style.font.subtitle
                     font.bold: true
                   }
@@ -1707,7 +1929,7 @@ Panel {
                     text: root.selectedGame && root.selectedGame.away ? "(" + root.selectedGame.away.record + ")" : ""
                     color: root.fg
                     opacity: 0.45
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.family: root.uiFont
                     font.pixelSize: Style.font.caption
                     anchors.verticalCenter: parent.verticalCenter
                   }
@@ -1718,7 +1940,7 @@ Panel {
                   text: root.detailTeams && root.detailTeams.away ? root.detailTeams.away.name : ""
                   color: root.fg
                   opacity: 0.45
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.family: root.uiFont
                   font.pixelSize: Style.font.caption
                   elide: Text.ElideRight
                   width: parent.width
@@ -1760,7 +1982,7 @@ Panel {
                   anchors.horizontalCenter: parent.horizontalCenter
                   text: root.detailTeams && root.detailTeams.home ? root.detailTeams.home.abbr : ""
                   color: root.fg
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.family: root.uiFont
                   font.pixelSize: Style.font.bodySmall
                   font.bold: true
                 }
@@ -1771,7 +1993,7 @@ Panel {
                     textFormat: Text.PlainText
                     text: root.selectedGame && root.selectedGame.home ? root.selectedGame.home.score : ""
                     color: root.detailFlashing || root.leads(root.selectedGame, "home") ? Color.accent : root.fg
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.family: root.uiFont
                     font.pixelSize: Style.font.subtitle
                     font.bold: true
                   }
@@ -1781,7 +2003,7 @@ Panel {
                     text: root.selectedGame && root.selectedGame.home ? "(" + root.selectedGame.home.record + ")" : ""
                     color: root.fg
                     opacity: 0.45
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.family: root.uiFont
                     font.pixelSize: Style.font.caption
                     anchors.verticalCenter: parent.verticalCenter
                   }
@@ -1792,7 +2014,7 @@ Panel {
                   text: root.detailTeams && root.detailTeams.home ? root.detailTeams.home.name : ""
                   color: root.fg
                   opacity: 0.45
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.family: root.uiFont
                   font.pixelSize: Style.font.caption
                   elide: Text.ElideRight
                   width: parent.width
@@ -1811,7 +2033,7 @@ Panel {
               text: root.detailTeams ? (root.detailTeams.venue + (root.detailTeams.addr ? " – " + root.detailTeams.addr : "") + (root.detailTeams.status ? " · " + root.detailTeams.status : "")) : ""
               color: root.fg
               opacity: 0.5
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.family: root.uiFont
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
@@ -1823,7 +2045,7 @@ Panel {
               text: root.detailTeams ? root.detailTeams.broadcast : ""
               color: root.fg
               opacity: 0.5
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.family: root.uiFont
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
@@ -1834,7 +2056,7 @@ Panel {
               horizontalAlignment: Text.AlignHCenter
               text: root.detailTeams ? root.detailTeams.situation : ""
               color: Color.accent
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.family: root.uiFont
               font.pixelSize: Style.font.caption
               font.bold: true
             }
@@ -1853,7 +2075,7 @@ Panel {
                 textFormat: Text.PlainText
                 text: (root.selectedGame ? root.selectedGame.away.abbr : "") + " " + (root.detailPredictor ? root.detailPredictor.awayPct : "") + "%"
                 color: root.selectedGame && (root.selectedGame.away.color || "") !== "" ? root.teamColor(root.selectedGame.away.color) : root.fg
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.family: root.uiFont
                 font.pixelSize: Style.font.caption
                 font.bold: true
               }
@@ -1868,7 +2090,7 @@ Panel {
                 textFormat: Text.PlainText
                 text: (root.detailPredictor ? root.detailPredictor.homePct : "") + "% " + (root.selectedGame ? root.selectedGame.home.abbr : "")
                 color: root.selectedGame && (root.selectedGame.home.color || "") !== "" ? root.teamColor(root.selectedGame.home.color) : root.fg
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.family: root.uiFont
                 font.pixelSize: Style.font.caption
                 font.bold: true
               }
@@ -1891,7 +2113,7 @@ Panel {
                   anchors.centerIn: parent
                   text: root.trFn("Overall")
                   color: root.detailTab === 0 ? Color.background : root.fg
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.family: root.uiFont
                   font.pixelSize: Style.font.caption
                   font.bold: root.detailTab === 0
                 }
@@ -1909,7 +2131,7 @@ Panel {
                   anchors.centerIn: parent
                   text: root.trFn("Players")
                   color: root.detailTab === 1 ? Color.background : root.fg
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.family: root.uiFont
                   font.pixelSize: Style.font.caption
                   font.bold: root.detailTab === 1
                 }
@@ -1927,7 +2149,7 @@ Panel {
                   anchors.centerIn: parent
                   text: root.trFn("Plays")
                   color: root.detailTab === 2 ? Color.background : root.fg
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.family: root.uiFont
                   font.pixelSize: Style.font.caption
                   font.bold: root.detailTab === 2
                 }
@@ -1945,7 +2167,7 @@ Panel {
                   anchors.centerIn: parent
                   text: root.trFn("Insights")
                   color: root.detailTab === 3 ? Color.background : root.fg
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.family: root.uiFont
                   font.pixelSize: Style.font.caption
                   font.bold: root.detailTab === 3
                 }
@@ -1982,7 +2204,7 @@ Panel {
                     text: root.trFn("Loading stats\u2026")
                     color: root.fg
                     opacity: 0.6
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.family: root.uiFont
                     font.pixelSize: Style.font.bodySmall
                   }
                 }
@@ -1994,7 +2216,7 @@ Panel {
               visible: root.detailError !== ""
               text: root.detailError
               color: root.urgentColor
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.family: root.uiFont
               font.pixelSize: Style.font.bodySmall
             }
             Button {
@@ -2002,7 +2224,7 @@ Panel {
               text: root.trFn("Retry")
               foreground: root.fg
               accent: Color.accent
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              fontFamily: root.uiFont
               onClicked: root.loadDetail()
             }
 
@@ -2109,7 +2331,7 @@ Repeater {
                     text: root.titleize(groupData.name || groupData.displayName || "")
                     color: root.fg
                     opacity: 0.9
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.family: root.uiFont
                     font.pixelSize: Style.font.caption
                     font.bold: true
                     elide: Text.ElideRight
@@ -2156,7 +2378,7 @@ Repeater {
                               verticalAlignment: Text.AlignVCenter
                               text: athleteData.athlete ? (athleteData.athlete.shortName || athleteData.athlete.displayName) : ""
                               color: root.fg
-                              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                              font.family: root.uiFont
                               font.pixelSize: Style.font.caption
                               elide: Text.ElideRight
                               HoverHandler { id: hoverPlayerAway }
@@ -2263,7 +2485,7 @@ Repeater {
                               verticalAlignment: Text.AlignVCenter
                               text: athleteData.athlete ? (athleteData.athlete.shortName || athleteData.athlete.displayName) : ""
                               color: root.fg
-                              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                              font.family: root.uiFont
                               font.pixelSize: Style.font.caption
                               elide: Text.ElideRight
                               HoverHandler { id: hoverPlayerHome }
@@ -2529,7 +2751,7 @@ Repeater {
                   width: parent.width
                   spacing: Style.space(6)
                   visible: root.detailLeaders && root.detailLeaders.length > 0
-                  Text { textFormat: Text.PlainText; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: root.trFn("Leaders"); color: root.fg; opacity: 0.7; font.family: root.bar ? root.bar.fontFamily : Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
+                  Text { textFormat: Text.PlainText; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: root.trFn("Leaders"); color: root.fg; opacity: 0.7; font.family: root.uiFont; font.pixelSize: Style.font.caption; font.bold: true }
                   Repeater {
                     model: root.detailLeaders
                     delegate: Column {
@@ -2576,7 +2798,7 @@ Repeater {
                   spacing: Style.space(6)
                   visible: root.detailPlays && root.detailPlays.length > 0
                   PanelSeparator { foreground: root.fg }
-                  Text { textFormat: Text.PlainText; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: root.trFn("Recent Plays"); color: root.fg; opacity: 0.7; font.family: root.bar ? root.bar.fontFamily : Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
+                  Text { textFormat: Text.PlainText; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: root.trFn("Recent Plays"); color: root.fg; opacity: 0.7; font.family: root.uiFont; font.pixelSize: Style.font.caption; font.bold: true }
                   Repeater {
                     model: root.detailPlays.length > 5 ? root.detailPlays.slice(root.detailPlays.length - 5) : (root.detailPlays || [])
                     delegate: Rectangle {
@@ -2619,7 +2841,7 @@ Repeater {
                   spacing: Style.space(6)
                   visible: root.detailStandings && root.detailStandings.groups && root.detailStandings.groups.length > 0
                   PanelSeparator { foreground: root.fg }
-                  Text { textFormat: Text.PlainText; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: root.trFn("Standings"); color: root.fg; opacity: 0.7; font.family: root.bar ? root.bar.fontFamily : Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
+                  Text { textFormat: Text.PlainText; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: root.trFn("Standings"); color: root.fg; opacity: 0.7; font.family: root.uiFont; font.pixelSize: Style.font.caption; font.bold: true }
                   Repeater {
                     model: root.detailStandings ? root.detailStandings.groups : []
                     delegate: Column {
@@ -2688,7 +2910,7 @@ Repeater {
                   spacing: Style.space(6)
                   visible: root.detailInjuries && root.detailInjuries.length > 0
                   PanelSeparator { foreground: root.fg }
-                  Text { textFormat: Text.PlainText; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: root.trFn("Injuries"); color: root.fg; opacity: 0.7; font.family: root.bar ? root.bar.fontFamily : Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
+                  Text { textFormat: Text.PlainText; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: root.trFn("Injuries"); color: root.fg; opacity: 0.7; font.family: root.uiFont; font.pixelSize: Style.font.caption; font.bold: true }
                   Repeater {
                     model: root.detailInjuries
                     delegate: Column {
@@ -2719,7 +2941,7 @@ Repeater {
                   spacing: Style.space(6)
                   visible: (root.detailNews && root.detailNews.length > 0) || (root.detailVideos && root.detailVideos.length > 0)
                   PanelSeparator { foreground: root.fg }
-                  Text { textFormat: Text.PlainText; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: root.trFn("Related"); color: root.fg; opacity: 0.7; font.family: root.bar ? root.bar.fontFamily : Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
+                  Text { textFormat: Text.PlainText; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: root.trFn("Related"); color: root.fg; opacity: 0.7; font.family: root.uiFont; font.pixelSize: Style.font.caption; font.bold: true }
                   Repeater {
                     model: root.detailNews
                     delegate: Text {

@@ -477,6 +477,56 @@ function parseGames(raw) {
     return { games: out, error: out.length ? "" : "No games scheduled" }
 }
 
+// Team schedule (Favorites view): one request per (league, team, season type).
+// No seasontype = the current one (e.g. preseason); 2 and 3 cover regular
+// season and postseason so the next games show across a season boundary.
+function scheduleArgs(leagueId, abbr, seasonType) {
+    if (!/^[A-Za-z0-9]{1,8}$/.test(String(abbr || ""))) return null
+    var L = leagueFor(leagueId)
+    if (L.id !== leagueId) return null
+    var url = "https://site.api.espn.com/apis/site/v2/sports/" + L.sport + "/" + L.league + "/teams/" + String(abbr).toLowerCase() + "/schedule"
+    if (seasonType) url += "?seasontype=" + seasonType
+    return ["curl", "-fsS", "--max-time", "10", "--max-filesize", MAX_BYTES, url]
+}
+// Every (league, abbr) with a favorited team, skipping the league-fav marker.
+function favTeams(favMap) {
+    var out = []
+    var lgs = favLeagues(favMap)
+    for (var i = 0; i < lgs.length; i++) {
+        var arr = favMap[lgs[i]]
+        for (var j = 0; j < arr.length; j++) out.push({ lg: lgs[i], abbr: arr[j] })
+    }
+    return out
+}
+// Schedule payloads put status on the competition, logos in team.logos[],
+// and scores as { displayValue } objects; normalize to parseGames' shape.
+function parseSchedule(raw) {
+    var txt = String(raw || "").trim()
+    if (!txt) return []
+    var data = parseBoundedJson(txt)
+    if (!data || typeof data !== "object") return []
+    var events = Array.isArray(data.events) ? data.events.slice(0, MAX_EVENTS) : []
+    var out = []
+    for (var i = 0; i < events.length; i++) {
+        var ev = events[i]
+        if (!ev || typeof ev !== "object") continue
+        var comp = Array.isArray(ev.competitions) ? ev.competitions[0] : null
+        if (!comp || typeof comp !== "object") continue
+        var st = (comp.status && comp.status.type) ? comp.status.type : ((ev.status && ev.status.type) ? ev.status.type : null)
+        var g = { id: clip(ev.id, 16), state: st ? clip(st.state, 16) : "", detail: st ? clip(st.shortDetail, 100) : "", date: clip(ev.date, 40), away: null, home: null }
+        var cs = Array.isArray(comp.competitors) ? comp.competitors : []
+        for (var j = 0; j < cs.length && j < 4; j++) {
+            var c = cs[j]
+            if (!c || !c.team || (c.homeAway !== "away" && c.homeAway !== "home")) continue
+            var logo = c.team.logo || (Array.isArray(c.team.logos) && c.team.logos[0] ? c.team.logos[0].href : "")
+            var sc = c.score && typeof c.score === "object" ? c.score.displayValue : c.score
+            g[c.homeAway] = { id: clip(c.team.id, 16), abbr: clip(c.team.abbreviation, 16), name: clip(c.team.displayName, 100), score: clip(sc, 16), logo: clip(logo, 500), color: clip(c.team.color, 16), record: "" }
+        }
+        if (g.away && g.home && validEventId(g.id)) out.push(g)
+    }
+    return out
+}
+
 // One week-range scoreboard fetch (?dates=A-B) covers the whole selector week;
 // bucket each event by its LOCAL calendar day so dots match the panel's days.
 function parseWeekRange(raw, weekDateStrs) {
