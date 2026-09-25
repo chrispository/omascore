@@ -1122,139 +1122,183 @@ Panel {
             }
           }
 
-          Flickable {
+          // Favorites / league switcher: underline tabs over a hairline
+          Item {
             width: parent.width
-            height: Style.space(32)
+            height: Style.space(30)
             visible: root.listVisible
-            clip: true
-            flickableDirection: Flickable.HorizontalFlick
-            contentWidth: leagueRow.implicitWidth
-            contentHeight: height
-            boundsBehavior: Flickable.StopAtBounds
-            Row {
-              id: leagueRow
-              spacing: Style.space(6)
-              height: parent.height
-              Repeater {
-                // "★ Favorites" is an aggregate view, not a league: no
-                // league-fav star, week dots, or lastLeague persistence
-                model: [{ id: "favs", label: "\u2605 " + root.trFn("Favorites") }].concat(Model.sortedLeagues(Model.leagues, root.favorites).filter(function(l) { return root.leagueVisible(l.id) }))
-                delegate: Rectangle {
-                  required property var modelData
-                  width: row.implicitWidth + Style.space(22)
-                  height: Style.space(26)
-                  anchors.verticalCenter: parent.verticalCenter
-                  radius: Style.space(13)
-                  color: root.currentLeagueId == modelData.id ? Color.accent : "transparent"
-                  border.width: root.currentLeagueId == modelData.id ? 0 : 1
-                  border.color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.18)
-                  Row {
-                    id: row
-                    anchors.centerIn: parent
-                    spacing: Style.space(4)
-                    z: 1
+            Rectangle {
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              height: 1
+              color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
+            }
+            Flickable {
+              anchors.fill: parent
+              clip: true
+              flickableDirection: Flickable.HorizontalFlick
+              contentWidth: leagueRow.implicitWidth
+              contentHeight: height
+              boundsBehavior: Flickable.StopAtBounds
+              Row {
+                id: leagueRow
+                spacing: Style.space(20)
+                height: parent.height
+                leftPadding: Style.space(2)
+                Repeater {
+                  // "★ Favorites" is an aggregate view, not a league: no
+                  // week dots or lastLeague persistence
+                  model: [{ id: "favs", label: "★ " + root.trFn("Favorites") }].concat(Model.sortedLeagues(Model.leagues, root.favorites).filter(function(l) { return root.leagueVisible(l.id) }))
+                  delegate: Item {
+                    required property var modelData
+                    readonly property bool active: root.currentLeagueId == modelData.id
+                    width: tabText.implicitWidth
+                    height: parent.height
                     Text {
+                      id: tabText
                       textFormat: Text.PlainText
-                      id: leagueText
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.verticalCenterOffset: -1
                       text: modelData.label
-                      color: root.currentLeagueId == modelData.id ? Color.background : root.fg
-                      opacity: root.currentLeagueId == modelData.id ? 1 : 0.7
+                      color: root.fg
+                      opacity: parent.active ? 1 : (tabHover.hovered ? 0.85 : 0.58)
                       font.family: root.uiFont
-                      font.pixelSize: Style.font.bodySmall
-                      font.weight: root.currentLeagueId == modelData.id ? Font.Bold : Font.Medium
+                      font.pixelSize: Style.font.body
+                      font.weight: Font.DemiBold
                     }
+                    // accent underline sits on the hairline
+                    Rectangle {
+                      anchors.left: parent.left
+                      anchors.right: parent.right
+                      anchors.bottom: parent.bottom
+                      height: 2
+                      radius: 1
+                      visible: parent.active
+                      color: Color.accent
+                    }
+                    HoverHandler { id: tabHover }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setLeague(modelData.id) }
                   }
-                  MouseArea { anchors.fill: parent; onClicked: root.setLeague(modelData.id) }
                 }
               }
             }
           }
 
-          RowLayout {
+          // Day strip: framed columns — hairlines above and below, thin
+          // dividers between days, selected day tinted with an accent top edge
+          Item {
             width: parent.width
-            spacing: Style.space(2)
+            height: Style.space(56)
             visible: root.weekDates.length === 7 && root.listVisible && !root.favView
+            Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; height: 1; color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12) }
+            Rectangle { anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom; height: 1; color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12) }
 
-            Button {
-              Layout.preferredWidth: Style.space(20)
-              Layout.preferredHeight: Style.space(28)
-              horizontalPadding: 0
-              iconText: "\u2039"
-              foreground: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.6)
-              accent: Color.accent
-              fontFamily: root.uiFont
-              onClicked: root.shiftWeek(-7)
-            }
+            RowLayout {
+              anchors.fill: parent
+              anchors.topMargin: 1
+              anchors.bottomMargin: 1
+              spacing: 0
 
-            Repeater {
-              model: 7
-              delegate: Rectangle {
-                required property int index
-                Layout.fillWidth: true
-                Layout.preferredHeight: Style.space(54)
-                radius: Style.space(10)
-                color: root.selectedDay === index ? Color.accent : (dayHover.hovered ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.06) : "transparent")
-                clip: true
-                HoverHandler { id: dayHover }
-
-                MouseArea {
-                  anchors.fill: parent
-                  onClicked: root.selectDay(index)
-                }
-
-                // day name + date centered in the cell; the games dot sits on
-                // its own at the bottom so it doesn't pull the text upward
-                Column {
-                  anchors.centerIn: parent
-                  spacing: 0
-
-                  Text {
-                    textFormat: Text.PlainText
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: root.weekDates.length === 7 ? (root.dayLabels[root.weekDates[index].getDay()] || "").toUpperCase() : ""
-                    color: root.selectedDay === index ? Color.background : (index === root.todayIndex ? Color.accent : root.fg)
-                    opacity: root.selectedDay === index || index === root.todayIndex ? 1 : 0.58
-                    font.family: root.uiFont
-                    font.pixelSize: Style.font.caption
-                    font.weight: Font.Medium
-                    font.letterSpacing: 0.6
-                  }
-
-                  Text {
-                    textFormat: Text.PlainText
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: root.weekDates.length === 7 ? root.weekDates[index].getDate() : ""
-                    color: root.selectedDay === index ? Color.background : root.fg
-                    font.family: root.figFont
-                    font.pixelSize: Style.font.heading
-                    font.bold: true
-                  }
-
-                }
-
-                Rectangle {
-                  anchors.horizontalCenter: parent.horizontalCenter
-                  anchors.bottom: parent.bottom
-                  anchors.bottomMargin: Style.space(5)
-                  visible: root.hasGames[index]
-                  width: 4
-                  height: 4
-                  radius: 2
-                  color: root.selectedDay === index ? Color.background : Color.accent
-                }
-
+              Button {
+                Layout.preferredWidth: Style.space(20)
+                Layout.preferredHeight: Style.space(28)
+                horizontalPadding: 0
+                iconText: "‹"
+                foreground: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.6)
+                accent: Color.accent
+                fontFamily: root.uiFont
+                onClicked: root.shiftWeek(-7)
               }
-            }
 
-            Button {
-              Layout.preferredWidth: Style.space(20)
-              Layout.preferredHeight: Style.space(28)
-              horizontalPadding: 0
-              iconText: "\u203A"
-              foreground: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.6)
-              accent: Color.accent
-              fontFamily: root.uiFont
-              onClicked: root.shiftWeek(7)
+              Repeater {
+                model: 7
+                delegate: Rectangle {
+                  required property int index
+                  readonly property bool sel: root.selectedDay === index
+                  Layout.fillWidth: true
+                  Layout.fillHeight: true
+                  color: sel ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.16) : (dayHover.hovered ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.05) : "transparent")
+                  HoverHandler { id: dayHover }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.selectDay(index)
+                  }
+
+                  // divider on the left of every column but the first
+                  Rectangle {
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: 1
+                    visible: index > 0
+                    color: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.07)
+                  }
+                  // accent top edge on the selected column
+                  Rectangle {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.topMargin: -1
+                    height: 2
+                    visible: parent.sel
+                    color: Color.accent
+                  }
+
+                  // day name + date centered in the cell; the games dot sits on
+                  // its own at the bottom so it doesn't pull the text upward
+                  Column {
+                    anchors.centerIn: parent
+                    spacing: 0
+
+                    Text {
+                      textFormat: Text.PlainText
+                      anchors.horizontalCenter: parent.horizontalCenter
+                      text: root.weekDates.length === 7 ? (root.dayLabels[root.weekDates[index].getDay()] || "").toUpperCase() : ""
+                      color: parent.parent.sel ? root.fg : (index === root.todayIndex ? Color.accent : root.fg)
+                      opacity: parent.parent.sel || index === root.todayIndex ? 1 : 0.58
+                      font.family: root.uiFont
+                      font.pixelSize: Style.font.caption
+                      font.weight: Font.Medium
+                      font.letterSpacing: 0.6
+                    }
+
+                    Text {
+                      textFormat: Text.PlainText
+                      anchors.horizontalCenter: parent.horizontalCenter
+                      text: root.weekDates.length === 7 ? root.weekDates[index].getDate() : ""
+                      color: parent.parent.sel ? Color.accent : root.fg
+                      font.family: root.figFont
+                      font.pixelSize: Style.font.heading
+                      font.bold: true
+                    }
+                  }
+
+                  Rectangle {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: Style.space(5)
+                    visible: root.hasGames[index]
+                    width: 4
+                    height: 4
+                    radius: 2
+                    color: Color.accent
+                  }
+                }
+              }
+
+              Button {
+                Layout.preferredWidth: Style.space(20)
+                Layout.preferredHeight: Style.space(28)
+                horizontalPadding: 0
+                iconText: "›"
+                foreground: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.6)
+                accent: Color.accent
+                fontFamily: root.uiFont
+                onClicked: root.shiftWeek(7)
+              }
             }
           }
 
