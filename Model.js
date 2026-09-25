@@ -174,14 +174,14 @@ function scoreEvent(prev, g) {
 // Minutes until kickoff when a pre-game reminder should fire (inside the
 // window), else -1. state comes from ESPN ("pre"|"in"|"post"). Window
 // defaults to 10 for the legacy 3-arg call shape.
-// Start time for list rows: "5 PM", "5:30 PM" — 12-hour, minutes only when
-// not on the hour, never seconds.
+// Start time for list rows: "5:00 PM", "6:30 PM" — 12-hour, always with
+// minutes so times line up at the same width, never seconds.
 function shortTime(d) {
     if (!(d instanceof Date) || isNaN(d.getTime())) return ""
     var h = d.getHours(), m = d.getMinutes()
     var ap = h < 12 ? "AM" : "PM"
     var h12 = h % 12 === 0 ? 12 : h % 12
-    return h12 + (m ? ":" + (m < 10 ? "0" + m : m) : "") + " " + ap
+    return h12 + ":" + (m < 10 ? "0" + m : m) + " " + ap
 }
 function kickoffMinutes(dateStr, state, now, window) {
     if (state !== "pre" || !dateStr) return -1
