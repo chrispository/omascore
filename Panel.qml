@@ -1172,9 +1172,6 @@ Panel {
             Button {
               id: settingsButton
               anchors.right: parent.right
-              // cancel the Button's internal padding so the gear glyph's right
-              // edge lines up with the score column instead of floating inset
-              anchors.rightMargin: -settingsButton.horizontalPadding
               anchors.verticalCenter: parent.verticalCenter
               iconText: "\uf013"
               tooltipText: root.trFn("Settings")
