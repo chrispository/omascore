@@ -1370,7 +1370,8 @@ Panel {
           TextField {
             id: filterField
             width: parent.width
-            visible: root.listVisible && !root.favView && root.shownGames.length > 4
+            // every day with games gets the filter, so the layout doesn't jump between days
+            visible: root.listVisible && !root.favView && root.shownGames.length > 0
             height: visible ? implicitHeight : 0
             placeholderText: root.trFn("Filter teams\u2026")
             text: root.filterText
