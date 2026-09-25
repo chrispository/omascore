@@ -820,7 +820,7 @@ Panel {
     return base + (root.showOdds && g.state === "pre" && g.odds ? "  \u00b7  " + g.odds : "")
   }
   function isPostponed(g) { return !!g && /postpon|cancel|suspend|delay/i.test(g.detail || "") }
-  function startTime(g) { return g && g.date ? Qt.formatTime(new Date(g.date), Locale.ShortFormat) : "" }
+  function startTime(g) { return g && g.date ? Model.shortTime(new Date(g.date)) : "" }
   // List status column: [main, sub]. Pre-game = start time only (the day is
   // already picked in the strip); live = clock over period ("8:14 - 2nd").
   function statusLines(g) {
@@ -1286,7 +1286,7 @@ Panel {
                   Text {
                     textFormat: Text.PlainText
                     anchors.horizontalCenter: parent.horizontalCenter
-                    text: (root.dayLabels[index] || "").toUpperCase()
+                    text: root.weekDates.length === 7 ? (root.dayLabels[root.weekDates[index].getDay()] || "").toUpperCase() : ""
                     color: root.selectedDay === index ? Color.background : (index === root.todayIndex ? Color.accent : root.fg)
                     opacity: root.selectedDay === index || index === root.todayIndex ? 1 : 0.58
                     font.family: root.uiFont
@@ -1350,9 +1350,9 @@ Panel {
             horizontalAlignment: Text.AlignHCenter
             text: {
               if (root.lastError !== "No games scheduled") return root.trFn(root.lastError)
-              var day = root.weekDates.length === 7 ? root.dayLabels[root.selectedDay] + " " + root.weekDates[root.selectedDay].getDate() : root.trFn("this day")
+              var day = root.weekDates.length === 7 ? root.dayLabels[root.weekDates[root.selectedDay].getDay()] + " " + root.weekDates[root.selectedDay].getDate() : root.trFn("this day")
               var nxt = Model.nextSelectedDay(root.hasGames, root.selectedDay)
-              if (nxt >= 0) return root.trFn("No games %1 \u2014 next up %2", day, root.dayLabels[nxt])
+              if (nxt >= 0) return root.trFn("No games %1 \u2014 next up %2", day, root.dayLabels[root.weekDates[nxt].getDay()])
               return root.trFn("No games %1 \u2014 try \u203A for next week", day)
             }
             visible: root.lastError !== "" && root.games.length === 0 && root.listVisible

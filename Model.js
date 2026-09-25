@@ -40,7 +40,8 @@ function summaryBaseFor(sport, league) { return "https://site.api.espn.com/apis/
 
 function ymd(d) {
     var y = d.getFullYear(), m = d.getMonth() + 1, dd = d.getDate()
-    return y + (m < 10 ? "0" + m : m) + (dd < 10 ? "0" + dd : dd)
+    // String() first: from October on, year + month would add as numbers
+    return String(y) + (m < 10 ? "0" + m : m) + (dd < 10 ? "0" + dd : dd)
 }
 
 function sundayOf(d) {
@@ -50,11 +51,16 @@ function sundayOf(d) {
     return nd
 }
 
+// The day strip is a 7-day window centered on today (3 days back, 3 ahead),
+// not a Sun–Sat calendar week, so today always sits in the middle cell.
+var CENTER_DAY = 3
 function weekDataFor(today) {
-    var s = sundayOf(today)
+    var s = new Date(today)
+    s.setHours(0, 0, 0, 0)
+    s.setDate(s.getDate() - CENTER_DAY)
     var dates = [], strs = []
     for (var i = 0; i < 7; i++) { var dd = new Date(s); dd.setDate(s.getDate() + i); dates.push(dd); strs.push(ymd(dd)) }
-    return { weekStart: s, weekDates: dates, weekDateStrs: strs, selectedDay: today.getDay() }
+    return { weekStart: s, weekDates: dates, weekDateStrs: strs, selectedDay: CENTER_DAY }
 }
 
 function weekDataShift(weekStart, delta, today) {
@@ -63,7 +69,7 @@ function weekDataShift(weekStart, delta, today) {
     var dates = [], strs = []
     for (var i = 0; i < 7; i++) { var dd = new Date(ns); dd.setDate(ns.getDate() + i); dates.push(dd); strs.push(ymd(dd)) }
     var idx = strs.indexOf(ymd(today))
-    return { weekStart: ns, weekDates: dates, weekDateStrs: strs, selectedDay: idx >= 0 ? idx : 0 }
+    return { weekStart: ns, weekDates: dates, weekDateStrs: strs, selectedDay: idx >= 0 ? idx : CENTER_DAY }
 }
 
 function weekLabel(weekDates) {
@@ -202,6 +208,15 @@ function scoreEvent(prev, g) {
 // Minutes until kickoff when a pre-game reminder should fire (inside the
 // window), else -1. state comes from ESPN ("pre"|"in"|"post"). Window
 // defaults to 10 for the legacy 3-arg call shape.
+// Start time for list rows: "5 PM", "5:30 PM" — 12-hour, minutes only when
+// not on the hour, never seconds.
+function shortTime(d) {
+    if (!(d instanceof Date) || isNaN(d.getTime())) return ""
+    var h = d.getHours(), m = d.getMinutes()
+    var ap = h < 12 ? "AM" : "PM"
+    var h12 = h % 12 === 0 ? 12 : h % 12
+    return h12 + (m ? ":" + (m < 10 ? "0" + m : m) : "") + " " + ap
+}
 function kickoffMinutes(dateStr, state, now, window) {
     if (state !== "pre" || !dateStr) return -1
     var t = new Date(dateStr)
@@ -547,8 +562,9 @@ function parseWeekRange(raw, weekDateStrs) {
 }
 
 function nextSelectedDay(hasGames, selectedDay) {
+    // forward only: the window runs past to future, so wrapping would point back in time
     if (hasGames[selectedDay]) return -1
-    for (var k = 0; k < 7; k++) { var idx = (selectedDay + k + 1) % 7; if (hasGames[idx]) return idx }
+    for (var idx = selectedDay + 1; idx < 7; idx++) if (hasGames[idx]) return idx
     return -1
 }
 
